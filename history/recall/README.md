@@ -15,7 +15,7 @@ This directory contains a FastAPI-based server for storing and retrieving chat m
 Install the required packages:
 
 ```bash
-pip install fastapi uvicorn pydantic
+uv pip install fastapi uvicorn pydantic
 ```
 
 ## Running the Server

@@ -10,8 +10,8 @@ RECALL_LOG_FILE="$RECALL_SERVER_DIR/server.log"
 
 # Extract recall server config
 get_recall_config() {
-    RECALL_PORT=$(cd "$RECALL_SERVER_DIR" && python3 -c "import settings; print(settings.port)" 2>/dev/null)
-    RECALL_HOST=$(cd "$RECALL_SERVER_DIR" && python3 -c "import settings; print(settings.host)" 2>/dev/null)
+    RECALL_PORT=$(cd "$RECALL_SERVER_DIR" && uv run python -c "import settings; print(settings.port)" 2>/dev/null)
+    RECALL_HOST=$(cd "$RECALL_SERVER_DIR" && uv run python -c "import settings; print(settings.host)" 2>/dev/null)
     
     if [ -z "$RECALL_PORT" ] || [ -z "$RECALL_HOST" ]; then
         echo "Error: Could not read recall server settings"
