@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Chat Messages API Server
+Recall API Server
 
 A simple FastAPI server for storing and retrieving chat messages.
 """
@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI):
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Chat Messages API",
+    title="Recall API",
     description="API for storing and retrieving chat messages",
     version="1.0.0",
     lifespan=lifespan
@@ -51,7 +51,7 @@ app.add_middleware(
 async def root():
     """Root endpoint with API information."""
     return {
-        "message": "Chat Messages API",
+        "message": "Recall API",
         "version": "1.0.0",
         "endpoints": [
             "/docs",  # Swagger UI
@@ -60,6 +60,13 @@ async def root():
             "/messages/{message_id}",  # GET specific message
             "/messages/",  # POST new message
         ],
+        "filtering": {
+            "author": "Filter by message author (?author=alice)",
+            "server": "Filter by server name (?server=discord-main)",
+            "channel": "Filter by channel name (?channel=general)",
+            "tag": "Filter by tag (?tag=project)",
+            "pagination": "Use ?limit=50&offset=100 for pagination"
+        },
         "time_filtering": {
             "hours_ago": "Get messages from last N hours (?hours_ago=24)",
             "minutes_ago": "Get messages from last N minutes (?minutes_ago=30)",
@@ -87,6 +94,8 @@ async def get_messages(
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     author: Optional[str] = Query(default=None),
+    server: Optional[str] = Query(default=None),
+    channel: Optional[str] = Query(default=None),
     tag: Optional[str] = Query(default=None),
     since: Optional[str] = Query(default=None, description="ISO datetime string (e.g. '2023-12-28T10:00:00')"),
     until: Optional[str] = Query(default=None, description="ISO datetime string (e.g. '2023-12-28T18:00:00')"),
@@ -121,7 +130,9 @@ async def get_messages(
         messages = db.get_messages(
             limit=limit, 
             offset=offset, 
-            author=author, 
+            author=author,
+            server=server,
+            channel=channel, 
             tag=tag,
             since=since_dt,
             until=until_dt

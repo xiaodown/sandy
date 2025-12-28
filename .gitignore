@@ -1,5 +1,7 @@
 # custom stuff for this project
 history/database/*
+*.pid
+*.log
 
 
 # Byte-compiled / optimized / DLL files

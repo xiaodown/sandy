@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script for the Chat Messages API.
+Test script for the Recall API.
 Demonstrates basic functionality.
 
 Note: tests are fully vibe coded
@@ -18,14 +18,14 @@ API_BASE = f"http://{settings.host}:{settings.port}"
 
 def test_api():
     """Test the basic API functionality."""
-    print("Testing Chat Messages API...")
+    print("Testing Recall API...")
     print(f"API Base: {API_BASE}")
     print("-" * 50)
     
     # Test tracking
     tests_passed = 0
     tests_failed = 0
-    total_tests = 9  # Update this if you add/remove tests
+    total_tests = 11  # Update this if you add/remove tests
     
     # Test 1: Check if server is running
     try:
@@ -52,6 +52,8 @@ def test_api():
             "author": "alice",
             "content": "Hello everyone! This is my first message.",
             "timestamp": (base_time - timedelta(minutes=10)).isoformat(),
+            "server": "discord-main",
+            "channel": "general",
             "tags": ["greeting", "introduction"],
             "summary": "Alice's introduction"
         },
@@ -59,6 +61,8 @@ def test_api():
             "author": "bob",
             "content": "Hey Alice! Welcome to the chat.",
             "timestamp": (base_time - timedelta(minutes=8)).isoformat(),
+            "server": "discord-main",
+            "channel": "general",
             "tags": ["greeting", "response"],
             "summary": "Bob welcomes Alice"
         },
@@ -66,6 +70,8 @@ def test_api():
             "author": "charlie",
             "content": "Has anyone seen the latest project updates?",
             "timestamp": (base_time - timedelta(minutes=5)).isoformat(),
+            "server": "discord-main",
+            "channel": "dev-talk",
             "tags": ["question", "project"],
             "summary": "Charlie asks about project updates"
         },
@@ -73,6 +79,8 @@ def test_api():
             "author": "alice",
             "content": "I haven't checked yet, but I can look into it.",
             "timestamp": (base_time - timedelta(minutes=2)).isoformat(),
+            "server": "discord-main",
+            "channel": "dev-talk",
             "tags": ["response", "project"],
             "summary": "Alice offers to check project updates"
         }
@@ -143,7 +151,37 @@ def test_api():
     
     print()
     
-    # Test 6: Get specific message
+    # Test 6: Filter by server
+    print("Filtering messages by server 'discord-main'...")
+    response = requests.get(f"{API_BASE}/messages/?server=discord-main")
+    if response.status_code == 200:
+        server_messages = response.json()
+        print(f"✓ Found {len(server_messages)} messages from discord-main server")
+        for msg in server_messages:
+            print(f"  [{msg['id']}] {msg['channel']}: {msg['author']}: {msg['content'][:50]}...")
+        tests_passed += 1
+    else:
+        print(f"✗ Failed to filter by server: {response.text}")
+        tests_failed += 1
+    
+    print()
+    
+    # Test 7: Filter by channel
+    print("Filtering messages by channel 'dev-talk'...")
+    response = requests.get(f"{API_BASE}/messages/?channel=dev-talk")
+    if response.status_code == 200:
+        channel_messages = response.json()
+        print(f"✓ Found {len(channel_messages)} messages from dev-talk channel")
+        for msg in channel_messages:
+            print(f"  [{msg['id']}] {msg['author']}: {msg['content'][:50]}...")
+        tests_passed += 1
+    else:
+        print(f"✗ Failed to filter by channel: {response.text}")
+        tests_failed += 1
+    
+    print()
+    
+    # Test 8: Get specific message
     if created_ids:
         msg_id = created_ids[0]
         print(f"Getting specific message (ID {msg_id})...")
@@ -151,6 +189,8 @@ def test_api():
         if response.status_code == 200:
             msg = response.json()
             print(f"✓ Retrieved message: {msg['author']}: {msg['content']}")
+            print(f"  Server: {msg['server']}")
+            print(f"  Channel: {msg['channel']}")
             print(f"  Tags: {msg.get('tags', 'None')}")
             print(f"  Summary: {msg.get('summary', 'None')}")
             tests_passed += 1
@@ -163,7 +203,7 @@ def test_api():
     
     print()
     
-    # Test 7: Get statistics
+    # Test 9: Get statistics
     print("Getting database statistics...")
     response = requests.get(f"{API_BASE}/stats/")
     if response.status_code == 200:
@@ -177,7 +217,7 @@ def test_api():
         print(f"✗ Failed to get stats: {response.text}")
         tests_failed += 1
     
-    # Test 8: Time range filtering - last hour
+    # Test 10: Time range filtering - last hour
     print("Testing time range filtering (last hour)...")
     response = requests.get(f"{API_BASE}/messages/?hours_ago=1")
     if response.status_code == 200:
@@ -192,7 +232,7 @@ def test_api():
     
     print()
     
-    # Test 9: Time range filtering - specific date range
+    # Test 11: Time range filtering - specific date range
     print("Testing specific date range filtering...")
     now = datetime.now()
     since_time = (now - timedelta(minutes=5)).isoformat()
