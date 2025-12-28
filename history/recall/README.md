@@ -1,4 +1,4 @@
-# Chat Messages API Server
+# Recall API Server
 
 This directory contains a FastAPI-based server for storing and retrieving chat messages.
 

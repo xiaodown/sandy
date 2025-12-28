@@ -12,6 +12,8 @@ class ChatMessageCreate(BaseModel):
     author: str = Field(..., min_length=1, max_length=255, description="Message author")
     content: str = Field(..., min_length=1, description="Message content")
     timestamp: datetime = Field(..., description="When the message was created (required)")
+    server: str = Field(..., min_length=1, max_length=255, description="Server name (required)")
+    channel: str = Field(..., min_length=1, max_length=255, description="Channel name (required)")
     tags: Optional[List[str]] = Field(default=None, description="Optional tags for the message")
     summary: Optional[str] = Field(default=None, max_length=1000, description="Optional message summary")
 
@@ -21,6 +23,8 @@ class ChatMessageCreate(BaseModel):
                 "author": "alice",
                 "content": "Hello, this is a test message!",
                 "timestamp": "2023-12-28T10:30:00",
+                "server": "discord-main",
+                "channel": "general",
                 "tags": ["greeting", "test"],
                 "summary": "A simple greeting message"
             }
@@ -33,6 +37,8 @@ class ChatMessageResponse(BaseModel):
     author: str
     content: str
     timestamp: datetime
+    server: str
+    channel: str
     tags: Optional[List[str]] = None
     summary: Optional[str] = None
 
@@ -44,6 +50,8 @@ class ChatMessageResponse(BaseModel):
                 "author": "alice",
                 "content": "Hello, this is a test message!",
                 "timestamp": "2023-12-28T10:30:00",
+                "server": "discord-main",
+                "channel": "general",
                 "tags": ["greeting", "test"],
                 "summary": "A simple greeting message"
             }
