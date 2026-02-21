@@ -2,6 +2,7 @@
 history/database/
 *.pid
 *.log
+notes
 
 
 # Byte-compiled / optimized / DLL files
