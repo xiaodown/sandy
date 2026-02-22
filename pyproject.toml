@@ -5,10 +5,12 @@ description = "General purpose chatbot"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "discord>=2.3.2",
     "fastapi>=0.128.0",
     "httpx>=0.28.1",
     "mcp[cli]>=1.25.0",
     "pydantic>=2.12.5",
+    "python-dotenv>=1.0.0",
     "requests>=2.32.5",
     "uvicorn[standard]>=0.40.0",
 ]

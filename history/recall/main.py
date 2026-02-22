@@ -8,11 +8,18 @@ A simple FastAPI server for storing and retrieving chat messages.
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import List, Optional
+import os
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-import settings
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / ".env")
+RECALL_HOST = os.getenv("RECALL_HOST", "127.0.0.1")
+RECALL_PORT = int(os.getenv("RECALL_PORT", "8000"))
+
 from database import ChatDatabase
 from models import ChatMessageCreate, ChatMessageResponse
 
@@ -93,49 +100,56 @@ async def create_message(message: ChatMessageCreate):
 async def get_messages(
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
-    author: Optional[str] = Query(default=None),
-    server: Optional[str] = Query(default=None),
-    channel: Optional[str] = Query(default=None),
-    tag: Optional[str] = Query(default=None),
-    since: Optional[str] = Query(default=None, description="ISO datetime string (e.g. '2023-12-28T10:00:00')"),
-    until: Optional[str] = Query(default=None, description="ISO datetime string (e.g. '2023-12-28T18:00:00')"),
+    # ID filters (exact, preferred)
+    author_id: Optional[int] = Query(default=None, description="Filter by Discord user ID"),
+    server_id: Optional[int] = Query(default=None, description="Filter by Discord server (guild) ID"),
+    channel_id: Optional[int] = Query(default=None, description="Filter by Discord channel ID"),
+    # Name filters (convenience; ID takes precedence if both provided)
+    author: Optional[str] = Query(default=None, description="Filter by author display name"),
+    server: Optional[str] = Query(default=None, description="Filter by server name"),
+    channel: Optional[str] = Query(default=None, description="Filter by channel name"),
+    tag: Optional[str] = Query(default=None, description="Filter by tag (substring match, e.g. 'game' matches 'gaming')"),
+    q: Optional[str] = Query(default=None, description="Full-text search against message content and summary (porter-stemmed)"),
+    since: Optional[str] = Query(default=None, description="ISO datetime string (e.g. '2026-02-21T10:00:00')"),
+    until: Optional[str] = Query(default=None, description="ISO datetime string (e.g. '2026-02-21T18:00:00')"),
     hours_ago: Optional[int] = Query(default=None, ge=0, description="Get messages from the last N hours"),
     minutes_ago: Optional[int] = Query(default=None, ge=0, description="Get messages from the last N minutes")
 ):
     """Get chat messages with optional filtering and time ranges."""
     try:
-        # Parse time parameters
         since_dt = None
         until_dt = None
-        
-        # Handle convenience parameters first
+
         if hours_ago is not None:
             since_dt = datetime.now() - timedelta(hours=hours_ago)
         elif minutes_ago is not None:
             since_dt = datetime.now() - timedelta(minutes=minutes_ago)
-        
-        # Handle explicit datetime parameters (override convenience params)
+
         if since:
             try:
                 since_dt = datetime.fromisoformat(since.replace('Z', '+00:00'))
             except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid 'since' datetime format. Use ISO format like '2023-12-28T10:00:00'")
-        
+                raise HTTPException(status_code=400, detail="Invalid 'since' datetime format. Use ISO format like '2026-02-21T10:00:00'")
+
         if until:
             try:
                 until_dt = datetime.fromisoformat(until.replace('Z', '+00:00'))
             except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid 'until' datetime format. Use ISO format like '2023-12-28T18:00:00'")
-        
+                raise HTTPException(status_code=400, detail="Invalid 'until' datetime format. Use ISO format like '2026-02-21T18:00:00'")
+
         messages = db.get_messages(
-            limit=limit, 
-            offset=offset, 
-            author=author,
-            server=server,
-            channel=channel, 
+            limit=limit,
+            offset=offset,
+            author_id=author_id,
+            author_name=author,
+            server_id=server_id,
+            server_name=server,
+            channel_id=channel_id,
+            channel_name=channel,
             tag=tag,
+            q=q,
             since=since_dt,
-            until=until_dt
+            until=until_dt,
         )
         return messages
     except HTTPException:
@@ -170,4 +184,4 @@ async def get_stats():
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host=settings.host, port=settings.port)
+    uvicorn.run(app, host=RECALL_HOST, port=RECALL_PORT)
