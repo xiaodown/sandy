@@ -164,10 +164,8 @@ TOOL_SCHEMAS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "author":      {"type": "string",  "description": "Filter by author display name"},
-                    "author_id":   {"type": "integer", "description": "Filter by Discord user ID (more reliable than name)"},
-                    "channel":     {"type": "string",  "description": "Filter by channel name"},
-                    "channel_id":  {"type": "integer", "description": "Filter by Discord channel ID"},
+                    "author":      {"type": "string",  "description": "Filter by author display name (use the name as it appears in chat)"},
+                    "channel":     {"type": "string",  "description": "Filter by channel name (only use when explicitly asked about a specific channel)"},
                     "tag":         {"type": "string",  "description": "Tag substring to filter by (e.g. 'game' matches 'gaming')"},
                     "hours_ago":   {"type": "integer", "description": "Limit to messages from the last N hours"},
                     "minutes_ago": {"type": "integer", "description": "Limit to messages from the last N minutes"},
@@ -192,10 +190,8 @@ TOOL_SCHEMAS: list[dict] = [
                 "type": "object",
                 "properties": {
                     "query":      {"type": "string",  "description": "Text to search for (stemmed, case-insensitive)"},
-                    "author":     {"type": "string",  "description": "Limit to a specific author display name"},
-                    "author_id":  {"type": "integer", "description": "Limit to a specific Discord user ID"},
-                    "channel":    {"type": "string",  "description": "Limit to a specific channel name"},
-                    "channel_id": {"type": "integer", "description": "Limit to a specific channel ID"},
+                    "author":     {"type": "string",  "description": "Limit to a specific author display name (use the name as it appears in chat)"},
+                    "channel":    {"type": "string",  "description": "Limit to a specific channel name (only use when explicitly asked about a specific channel)"},
                     "hours_ago":  {"type": "integer", "description": "Limit to the last N hours"},
                     "limit":      {"type": "integer", "description": "Maximum messages to return (default 50)"},
                 },
@@ -239,14 +235,21 @@ async def dispatch(
         logger.warning("Brain requested unknown tool: %r", tool_name)
         return f"Error: unknown tool '{tool_name}'."
 
-    # Enforce server isolation: stamp server context onto all memory tools.
-    # Note: the Recall API uses "server" (not "server_name") as the query param
-    # for the name filter; "server_id" is the primary isolation key.
+    # Enforce server isolation: stamp server_id onto all memory tools.
+    # Also strip channel_id — Sandy has no reliable way to know channel snowflakes;
+    # she should search server-wide and filter by channel *name* only if the user
+    # explicitly named one. Leaving channel_id in causes silent empty results when
+    # the model hallucinates or copies a stale ID from prior context.
     if tool_name in _SERVER_SCOPED_TOOLS:
-        arguments = {**arguments, "server_id": server_id, "server": server_name}
+        # Strip any integer snowflake IDs the model may have hallucinated —
+        # channel_id and author_id are never shown to the model so it can only
+        # guess them, and wrong IDs silently return zero results.
+        # Name-based filters (author, channel) are safe: names appear in context.
+        arguments = {k: v for k, v in arguments.items() if k not in ("channel_id", "author_id")}
+        arguments = {**arguments, "server_id": server_id}
 
     # Log without server context to keep logs tidy (it's always the same value).
-    loggable = {k: v for k, v in arguments.items() if k not in ("server_id", "server", "server_name")}
+    loggable = {k: v for k, v in arguments.items() if k not in ("server_id",)}
     logger.info("Tool dispatch → %s(%s)", tool_name, loggable)
 
     try:

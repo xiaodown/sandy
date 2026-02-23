@@ -390,9 +390,12 @@ class ChatDatabase:
                 params.append(f"%{tag_normalized}%")
 
             if q:
-                # Wrap in double-quotes for FTS5 phrase matching — safe against
-                # special characters in user input, and searches content + summary.
-                fts_query = '"' + q.replace('"', '""') + '"'
+                # Pass the query through to FTS5 as-is so boolean operators work.
+                # 'Rob OR Robst', 'memory AND system', plain words, all valid FTS5.
+                # Queries come from the LLM, not raw user input, so operator syntax
+                # is intentional. Strip bare double-quotes that could cause a parse
+                # error if unbalanced.
+                fts_query = q.replace('"', '')
                 query += """
                     AND cm.id IN (
                         SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?

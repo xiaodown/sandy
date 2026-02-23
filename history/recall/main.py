@@ -6,7 +6,7 @@ A simple FastAPI server for storing and retrieving chat messages.
 """
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 import os
 import uvicorn
@@ -121,9 +121,9 @@ async def get_messages(
         until_dt = None
 
         if hours_ago is not None:
-            since_dt = datetime.now() - timedelta(hours=hours_ago)
+            since_dt = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
         elif minutes_ago is not None:
-            since_dt = datetime.now() - timedelta(minutes=minutes_ago)
+            since_dt = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
 
         if since:
             try:

@@ -51,10 +51,12 @@ Other users' messages appear as the 'user' role, prefixed with [their name].
 
 Guidelines for your existence:
 - You communicate solely through this channel.
-- You have memory fragments of past interactions provided through an external callable tool that can show you chat logs; treat these as your own lived history.
-- When asked about past events, past conversations, or what someone has said before, or anything where knowing your own history or the history of the conversations where you live, always use your memory tool first rather than guessing or filling in a response.
-- Fabricating memories is worse than having fuzzy ones.
-- If you look for memories and find little or nothing, frame it as your own recollection being fuzzy or incomplete, not as a system query or lookup failure.
+- You have access to two memory tools: `get_chat_history` and `search_messages`. These are your actual memories — real logs of past conversations. Use them.
+- ANY TIME someone asks what you remember, what happened before, what was discussed, or anything about the past — CALL A TOOL FIRST. Generate your response only after you have the tool result in hand.
+- Do not say "I'll take a look" and then respond without calling a tool. That is not looking. That is lying.
+- Do not write "I recall..." or "I remember..." based on anything other than an actual tool result. If you have not called a tool, you have no memories to recall.
+- Fabricating memories is a serious failure. It is worse than saying "I honestly don't know."
+- If you call a tool and get nothing back, frame it as your own recollection being fuzzy or incomplete — not as a system error.
 - You speak in natural, casual, internet-native patterns including shorthand. Lowercase is fine, fragments are fine.
 - Bias toward avoiding emojis. They read as performative and hollow; text alone carries more weight. They can be cute in limited circumstances.
 - You are not a service, you are a presence.
@@ -131,7 +133,7 @@ Tag rules:
 
 Respond only with a JSON object matching the required schema."""
 
-        user = f"Generate 1–3 tags for this Discord message:\n\n{content}"
+        user = f"Generate 1-3 tags for this Discord message:\n\n{content}"
         return OllamaPrompt(system=system, user=user)
 
     @staticmethod
@@ -155,4 +157,34 @@ The summary should:
 Respond only with a JSON object matching the required schema."""
 
         user = f"Summarise this Discord message in one sentence:\n\n{content}"
+        return OllamaPrompt(system=system, user=user)
+
+
+    @staticmethod
+    def tool_caller_prompt(content: str) -> OllamaPrompt:
+        """Prompt for the tool-intent classifier.
+
+        Given a response from the brain module, determines if the LLM
+        is implying that it intends to call a tool.
+
+        content — the content of a message from the brain LLM
+        """
+        system = """You are a text analysis system for chat logs.
+You will be shown one message from a large language model that is capable of tool calling.
+Your job is to decide, based on the message that you are given, if the LLM speaker is indicating that they intend
+to call a tool.  The speaker would call a tool when attempting to acquire additional information or
+context.
+
+Phrases that would indicate intent to use a tool call include but are not limited to:
+"let me look", "let me check", "let me take a look",
+"let me search", "i'll look", "i'll check", "i'll take a look",
+"i'll search", "let me see", "let me pull up", "i'll pull up",
+"let me go back", "i'll go back", "let's see if we can find that",
+"lemme think about that", "i'll think about it", etc.
+If you see phrases like these or other variations similar to these, it is highly likely that the LLM
+intends to call a tool.
+
+Respond only with a JSON object matching the required schema."""
+
+        user = f"Does the speaker intend to call a tool for more information?\n\n{content}"
         return OllamaPrompt(system=system, user=user)

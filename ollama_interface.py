@@ -36,7 +36,7 @@ valid JSON by itself.
 import asyncio
 import logging
 import os
-from typing import Optional
+from typing import Callable, Optional
 
 import ollama
 from pydantic import BaseModel, field_validator
@@ -88,6 +88,9 @@ class BouncerResponse(BaseModel):
     should_respond: bool
     reason: str  # brief explanation — useful for debugging / logging
 
+class ToolCallerResponse(BaseModel):
+    """Structured output for the tool caller role."""
+    tool_call_intended: bool
 
 class TaggerResponse(BaseModel):
     """Structured output for the Tagger role."""
@@ -200,6 +203,40 @@ class OllamaInterface:
             return False
 
     # ------------------------------------------------------------------
+    # Tool Caller — is Sandy indicating that she wants to use a tool?
+    # ------------------------------------------------------------------
+
+    async def ask_tool_intent(self, context: str) -> bool:
+        """Ask the tool caller wether Sandy intends to call a tool
+
+        context  — a string of the reply from the brain LLM
+
+        Returns True if Sandy intends to use a tool, False otherwise.
+        On any error, returns False (fail closed — don't respond if unsure).
+        """
+        prompt = SandyPrompt.tool_caller_prompt(context)
+        try:
+            async with self._lock:  # high-priority: always wait
+                response = await self._client.chat(
+                    model=_BRAIN_MODEL, # so it doesn't unload out of the vram
+                    messages=[
+                        {"role": "system", "content": prompt.system},
+                        {"role": "user",   "content": prompt.user},
+                    ],
+                    format=ToolCallerResponse.model_json_schema(),
+                    keep_alive=_KEEP_ALIVE,
+                )
+            result = ToolCallerResponse.model_validate_json(response.message.content)
+            logger.info(
+                "Tool caller intent → tool_call_intended=%s",
+                result.tool_call_intended
+            )
+            return result.tool_call_intended
+        except Exception as exc:
+            logger.error("Tool Intent error (defaulting to no-respond): %s", exc)
+            return False
+
+    # ------------------------------------------------------------------
     # Tagger — generate recall tags
     # ------------------------------------------------------------------
 
@@ -275,6 +312,7 @@ class OllamaInterface:
         channel_name: str = "general",
         server_id: int = 0,
         tools: Optional[list] = None,
+        send_fn: Optional[Callable] = None,
     ) -> Optional[str]:
         """Generate a response from the Brain model.
 
@@ -287,6 +325,10 @@ class OllamaInterface:
         server_id    — the Discord guild ID; injected into all Recall tool calls
                        so Sandy cannot access another server's message history.
         tools        — list of ollama tool schema dicts (from tools.TOOL_SCHEMAS).
+        send_fn      — optional async callable (e.g. channel.send) invoked with
+                       the deferral text when Sandy says "let me check" without
+                       calling a tool. Lets the user see Sandy's intent while
+                       the tool call and final reply are still in flight.
 
         Returns the response text, or None on error.
         """
@@ -295,13 +337,16 @@ class OllamaInterface:
             server_name=server_name,
             channel_name=channel_name,
         )
-        # System prompt first, then conversation history, then the grounding
-        # user turn (current time + location) so it's the last thing she sees
-        # before generating a response.
+        # System prompt (with grounding appended) followed by conversation history.
+        # The grounding line (current time + server/channel) is merged into the
+        # system prompt rather than appended as a trailing user turn. Appending it
+        # as a user turn creates two consecutive user-role messages whenever the
+        # conversation history already ends with a user turn (i.e. always), which
+        # causes models that expect strict user/assistant alternation to enter
+        # "completion mode" and echo the entire context back in their reply.
         full_messages = (
-            [{"role": "system", "content": prompt.system}]
+            [{"role": "system", "content": f"{prompt.system}\n\n{prompt.user}"}]
             + messages
-            + [{"role": "user", "content": prompt.user}]
         )
         try:
             kwargs: dict = {
@@ -341,8 +386,39 @@ class OllamaInterface:
             # The lock is released between rounds so the GPU is free while
             # we await the Recall HTTP call; ollama's KV cache means the
             # re-call only processes the new tokens, not the whole history.
+            #
+            # Deferral detection: if round 0 produces text-only with no tool
+            # calls but the text looks like "let me check" / "I'll look", the
+            # model intended to use a tool but misfired. If send_fn is set,
+            # the deferral text is sent to Discord immediately so the user sees
+            # Sandy's intent; then a forcing nudge is injected and we loop again.
+            # The final post-tool reply is returned normally and sent by the caller.
+
             for _round in range(_tools.MAX_TOOL_ROUNDS):
                 if not response.message.tool_calls:
+                    # Round 0 text-only: check for deferral without tool call.
+                    if _round == 0 and kwargs.get("tools"):
+                        content_lower = (response.message.content or "").lower()
+                        if await self.ask_tool_intent(content_lower):
+                            logger.info(
+                                "Brain deferred without calling a tool — injecting forcing nudge"
+                            )
+                            # Send the deferral text to Discord immediately so
+                            # the user sees Sandy's intent while the tool call
+                            # and final reply are still generating.
+                            if send_fn and response.message.content:
+                                await send_fn(response.message.content)
+                            # Keep the deferral in context so the model doesn't
+                            # contradict itself, but force it to act now.
+                            full_messages.append(response.message)
+                            full_messages.append({
+                                "role": "user",
+                                "content": "Please call your memory tools now.",
+                            })
+                            kwargs["messages"] = full_messages
+                            async with self._lock:
+                                response = await self._client.chat(**kwargs)
+                            continue  # re-evaluate at top of loop
                     break
 
                 names = [tc.function.name for tc in response.message.tool_calls]
