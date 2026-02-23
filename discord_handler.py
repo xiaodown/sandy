@@ -22,7 +22,7 @@ import logging
 
 from logconf import get_logger
 from registry import Registry
-from last10 import Last10
+from last10 import Last10, resolve_mentions
 from memory import MemoryClient
 from ollama_interface import OllamaInterface
 import tools
@@ -45,12 +45,19 @@ cache = Last10(maxlen=10, registry=registry)
 llm = OllamaInterface()
 memory = MemoryClient(llm=llm)
 
+# Guard so cache seeding only runs once, even if on_ready fires on reconnect.
+_cache_seeded = False
 
 
 @bot.event
 async def on_ready():
     """Event handler for when the bot is ready."""
+    global _cache_seeded
     logger.info("Logged in as %s (%s)", bot.user.name, bot.user.id)
+    if not _cache_seeded:
+        seeded = await memory.seed_cache(cache)
+        logger.info("Cache seeded with %d message(s) from Recall", seeded)
+        _cache_seeded = True
 
 
 @bot.event
@@ -70,7 +77,7 @@ async def on_message(message: discord.Message):
     # Add to the short-term in-memory rolling cache
     cache.add(message)
 
-    logger.info("[%s/%s] %s: %s", message.guild.name, message.channel.name, message.author.display_name, message.content)
+    logger.info("[%s/%s] %s: %s", message.guild.name, message.channel.name, message.author.display_name, resolve_mentions(message.content, message.mentions))
 
     if message.author.bot:
         # Store bot messages (including Sandy's own replies) in Recall and last10
@@ -89,17 +96,6 @@ async def on_message(message: discord.Message):
     # Fast-path: if Sandy is directly named or @mentioned, skip the bouncer entirely.
     # This catches "hey Sandy", "sandy can you...", "@sandy-test", etc. deterministically
     # without relying on the small model to get it right.
-    bot_name_lower = bot.user.display_name.lower()
-    content_lower  = message.content.lower()
-    directly_addressed = (
-        bot.user.mentioned_in(message)
-        or bot_name_lower in content_lower
-    )
-    #if directly_addressed:
-    #    logger.info("Bouncer bypassed — Sandy directly addressed")
-    #    should_respond = True
-    #else:
-    #    should_respond = await llm.ask_bouncer(history.format(), bot_name=bot.user.display_name)
     should_respond = await llm.ask_bouncer(history.format(), bot_name=bot.user.display_name)
 
     if should_respond:
@@ -115,15 +111,16 @@ async def on_message(message: discord.Message):
                 channel_name=message.channel.name,
                 server_id=message.guild.id,
                 tools=tools.TOOL_SCHEMAS,
+                send_fn=message.channel.send,
             )
 
-        if reply:
-            await message.channel.send(reply)
-            logger.info("Brain replied in %s/%s (%d chars)",
-                        message.guild.name, message.channel.name, len(reply))
-        else:
-            logger.warning("Brain returned None for message in %s/%s — not sending",
-                           message.guild.name, message.channel.name)
+            if reply:
+                await message.channel.send(reply)
+                logger.info("Brain replied in %s/%s (%d chars)",
+                            message.guild.name, message.channel.name, len(reply))
+            else:
+                logger.warning("Brain returned None for message in %s/%s — not sending",
+                               message.guild.name, message.channel.name)
 
     # --- Memory (fire-and-forget after pipeline) -----------------------
     # Now that the LLM is free, tag and store the message in the background.

@@ -18,6 +18,7 @@ Public API
 
 import logging
 import os
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 import httpx
@@ -124,6 +125,72 @@ class MemoryClient:
         summary  — optional one-line LLM summary of the message
         """
         return await self._post(message, tags=tags, summary=summary)
+
+    async def seed_cache(self, cache: "Last10", hours: int = 24) -> int:
+        """Seed the in-memory rolling cache from Recall on bot startup.
+
+        Queries Recall for the last ``hours`` hours of messages, groups them
+        by (server_id, channel_id), and adds the most recent ``cache.maxlen``
+        from each channel as SyntheticMessage objects.
+
+        Safe to call once from on_ready.  Returns the total number of messages
+        seeded (0 on any error, so a cold Recall is not fatal).
+        """
+        from last10 import SyntheticMessage, _SyntheticAuthor, _SyntheticGuild, _SyntheticChannel
+
+        try:
+            response = await self._client.get(
+                f"{self._base_url}/messages/",
+                params={"hours_ago": hours, "limit": 1000},
+            )
+            response.raise_for_status()
+            raw: list[dict] = response.json()
+        except Exception as exc:
+            logger.error("seed_cache: failed to fetch from Recall — %s", exc)
+            return 0
+
+        # Recall returns newest-first (ORDER BY timestamp DESC).
+        # Group by channel, preserving that order so we can slice cheaply.
+        groups: dict[tuple[int, int], list[dict]] = {}
+        for m in raw:
+            key = (m["server_id"], m["channel_id"])
+            groups.setdefault(key, []).append(m)
+
+        maxlen = cache.maxlen
+        count = 0
+        for msgs in groups.values():
+            # Take at most maxlen (already newest-first), then reverse so we
+            # add them oldest-first — matching the deque's expected append order.
+            recent = list(reversed(msgs[:maxlen]))
+            for m in recent:
+                ts = m["timestamp"]
+                created_at = datetime.fromisoformat(ts)
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                sm = SyntheticMessage(
+                    content=m["content"],
+                    created_at=created_at,
+                    author=_SyntheticAuthor(
+                        id=m["author_id"],
+                        display_name=m["author_name"],
+                    ),
+                    guild=_SyntheticGuild(
+                        id=m["server_id"],
+                        name=m["server_name"],
+                    ),
+                    channel=_SyntheticChannel(
+                        id=m["channel_id"],
+                        name=m["channel_name"],
+                    ),
+                )
+                cache.add(sm)
+                count += 1
+
+        logger.info(
+            "seed_cache: seeded %d messages across %d channel(s) from the last %dh",
+            count, len(groups), hours,
+        )
+        return count
 
     async def close(self) -> None:
         """Cleanly close the underlying HTTP client. Call on bot shutdown."""

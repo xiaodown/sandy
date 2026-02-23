@@ -18,10 +18,72 @@ Usage:
 """
 
 from collections import deque
+from dataclasses import dataclass, field as _dc_field
 from datetime import datetime, timezone
 from typing import Optional
 
 import discord
+
+
+# ---------------------------------------------------------------------------
+# SyntheticMessage — lightweight discord.Message stand-in for cache seeding
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _SyntheticAuthor:
+    id: int
+    display_name: str
+    bot: bool = False
+
+
+@dataclass
+class _SyntheticGuild:
+    id: int
+    name: str
+
+
+@dataclass
+class _SyntheticChannel:
+    id: int
+    name: str
+
+
+@dataclass
+class SyntheticMessage:
+    """Lightweight stand-in for discord.Message, used when seeding the cache
+    from Recall on startup.
+
+    Exposes only the attributes that ChannelHistory.format() and
+    to_ollama_messages() read, so it is transparently duck-typed anywhere a
+    discord.Message is expected inside last10.py.
+
+    ``mentions`` is always an empty list — raw ``<@ID>`` tokens in seeded
+    messages will not be resolved, but this is a minor cosmetic issue and
+    only affects the very first few turns after a restart.
+    """
+    content: str
+    created_at: datetime
+    author: _SyntheticAuthor
+    guild: _SyntheticGuild
+    channel: _SyntheticChannel
+    mentions: list = _dc_field(default_factory=list)
+
+
+def resolve_mentions(content: str, mentions: list[discord.Member]) -> str:
+    """Replace Discord mention tokens with human-readable display names.
+
+    Discord encodes @mentions as ``<@USER_ID>`` (or the legacy ``<@!USER_ID>``
+    variant for nickname mentions). This substitutes each token with the
+    member's server-specific nickname, falling back to their global name if
+    no server nickname is set.
+
+    mentions — message.mentions from a discord.Message object.
+    """
+    for member in mentions:
+        name = member.display_name  # server nick > global display name
+        content = content.replace(f"<@{member.id}>", name)
+        content = content.replace(f"<@!{member.id}>", name)  # legacy format
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +191,7 @@ class ChannelHistory:
         for msg in msgs:
             age = _format_age(msg.created_at)
             name = msg.author.display_name      # respects server nickname automatically
-            content = msg.content.replace("\n", " ").strip()
+            content = resolve_mentions(msg.content, msg.mentions).replace("\n", " ").strip()
             if not content:
                 # Attachment-only or embed-only messages
                 content = "(no text content)"
@@ -155,7 +217,7 @@ class ChannelHistory:
 
         for msg in self._messages:  # oldest → newest
             role = "assistant" if msg.author.id == bot_id else "user"
-            content = msg.content.replace("\n", " ").strip() or "(no text content)"
+            content = resolve_mentions(msg.content, msg.mentions).replace("\n", " ").strip() or "(no text content)"
             age = _format_age(msg.created_at)
             # Age prefix on every line so gaps are visible even inside merged turns.
             line = f"[{age}] {content}" if role == "assistant" else f"[{age}] [{msg.author.display_name}] {content}"
