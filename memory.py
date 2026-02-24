@@ -27,6 +27,8 @@ from dotenv import load_dotenv
 
 if TYPE_CHECKING:
     from ollama_interface import OllamaInterface
+    from vector_memory import VectorMemory
+    from last10 import Last10
 
 load_dotenv()
 
@@ -62,11 +64,13 @@ class MemoryClient:
         base_url: str = RECALL_BASE_URL,
         timeout: float = 10.0,
         llm: "Optional[OllamaInterface]" = None,
+        vector_memory: "Optional[VectorMemory]" = None,
     ):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._client = httpx.AsyncClient(timeout=self._timeout)
         self._llm = llm
+        self._vector_memory = vector_memory
 
     # ------------------------------------------------------------------
     # Public interface
@@ -97,6 +101,19 @@ class MemoryClient:
                 summary = await self._llm.ask_summarizer(message.content)
 
         stored = await self._post(message, tags=tags or None, summary=summary)
+
+        # Embed and store in the vector memory for semantic RAG retrieval.
+        # message.id is always a real Discord snowflake here — process_and_store
+        # is only ever called with genuine discord.Message objects.
+        if self._vector_memory is not None and message.content:
+            await self._vector_memory.add_message(
+                message_id  = str(message.id),
+                content     = message.content,
+                author_name = message.author.display_name,
+                server_id   = message.guild.id,
+                timestamp   = message.created_at,
+            )
+
         logger.info(
             "Stored message from %s in %s/%s — tags=%r summary=%s stored=%s",
             message.author.display_name,
