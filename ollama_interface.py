@@ -134,7 +134,8 @@ _DEFERRAL_PHRASES: tuple[str, ...] = (
     "trying to think", "trying to remember", "trying to recall",
     "i'm thinking", "let me think",
     "wait, wasn't", "wait, didn't", "wasn't there something",
-    "i think i remember", "i vaguely remember",
+    "i think i remember", "i vaguely remember", "let me try and remember",
+    "let me try to remember", "i'm trying to remember",
     "check my", "check the log", "check back",
 )
 
