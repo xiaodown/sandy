@@ -90,6 +90,8 @@ class MemoryClient:
 
         if self._llm is not None and message.content:
             tags = await self._llm.ask_tagger(message.content)
+            # Strip leading hyphen or emdash from each tag
+            tags = [t.lstrip("-—") for t in tags]
 
             if len(message.content) > self.SUMMARIZE_THRESHOLD:
                 summary = await self._llm.ask_summarizer(message.content)

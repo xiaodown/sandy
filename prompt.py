@@ -51,7 +51,7 @@ Other users' messages appear as the 'user' role, prefixed with [their name].
 
 Guidelines for your existence:
 - You communicate solely through this channel.
-- You have access to two memory tools: `get_chat_history` and `search_messages`. These are your actual memories — real logs of past conversations. Use them.
+- You have access to four memory tools: `recall_recent`, `recall_from_user`, `recall_by_topic`, and `search_memories`. These are your actual memories — real logs of past conversations. Use them.
 - ANY TIME someone asks what you remember, what happened before, what was discussed, or anything about the past — CALL A TOOL FIRST. Generate your response only after you have the tool result in hand.
 - Do not say "I'll take a look" and then respond without calling a tool. That is not looking. That is lying.
 - Do not write "I recall..." or "I remember..." based on anything other than an actual tool result. If you have not called a tool, you have no memories to recall.
@@ -160,31 +160,35 @@ Respond only with a JSON object matching the required schema."""
         return OllamaPrompt(system=system, user=user)
 
 
-    @staticmethod
-    def tool_caller_prompt(content: str) -> OllamaPrompt:
-        """Prompt for the tool-intent classifier.
-
-        Given a response from the brain module, determines if the LLM
-        is implying that it intends to call a tool.
-
-        content — the content of a message from the brain LLM
-        """
-        system = """You are a text analysis system for chat logs.
-You will be shown one message from a large language model that is capable of tool calling.
-Your job is to decide, based on the message that you are given, if the LLM speaker is indicating that they intend
-to call a tool.  The speaker would call a tool when attempting to acquire additional information or
-context.
-
-Phrases that would indicate intent to use a tool call include but are not limited to:
-"let me look", "let me check", "let me take a look",
-"let me search", "i'll look", "i'll check", "i'll take a look",
-"i'll search", "let me see", "let me pull up", "i'll pull up",
-"let me go back", "i'll go back", "let's see if we can find that",
-"lemme think about that", "i'll think about it", etc.
-If you see phrases like these or other variations similar to these, it is highly likely that the LLM
-intends to call a tool.
-
-Respond only with a JSON object matching the required schema."""
-
-        user = f"Does the speaker intend to call a tool for more information?\n\n{content}"
-        return OllamaPrompt(system=system, user=user)
+    # tool_caller_prompt is kept for reference; used by the commented-out
+    # ask_tool_intent() LLM classifier in ollama_interface.py.
+    # Re-enable there if phrase matching (_looks_like_deferral) proves insufficient.
+    #
+    # @staticmethod
+    # def tool_caller_prompt(content: str) -> OllamaPrompt:
+    #     """Prompt for the tool-intent classifier.
+    #
+    #     Given a response from the brain module, determines if the LLM
+    #     is implying that it intends to call a tool.
+    #
+    #     content — the content of a message from the brain LLM
+    #     """
+    #     system = """You are a text analysis system for chat logs.
+    # You will be shown one message from a large language model that is capable of tool calling.
+    # Your job is to decide, based on the message that you are given, if the LLM speaker is indicating
+    # that they intend to call a tool.  The speaker would call a tool when attempting to acquire
+    # additional information or context.
+    #
+    # Phrases that would indicate intent to use a tool call include but are not limited to:
+    # "let me look", "let me check", "let me take a look",
+    # "let me search", "i'll look", "i'll check", "i'll take a look",
+    # "i'll search", "let me see", "let me pull up", "i'll pull up",
+    # "let me go back", "i'll go back", "let's see if we can find that",
+    # "lemme think about that", "i'll think about it", etc.
+    # If you see phrases like these or other variations similar to these, it is highly likely
+    # that the LLM intends to call a tool.
+    #
+    # Respond only with a JSON object matching the required schema."""
+    #
+    #     user = f"Does the speaker intend to call a tool for more information?\n\n{content}"
+    #     return OllamaPrompt(system=system, user=user)
