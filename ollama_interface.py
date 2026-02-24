@@ -88,9 +88,12 @@ class BouncerResponse(BaseModel):
     should_respond: bool
     reason: str  # brief explanation — useful for debugging / logging
 
-class ToolCallerResponse(BaseModel):
-    """Structured output for the tool caller role."""
-    tool_call_intended: bool
+# ToolCallerResponse is kept for reference; used by the commented-out
+# ask_tool_intent() LLM classifier below. Re-enable if phrase matching
+# proves insufficient.
+# class ToolCallerResponse(BaseModel):
+#     """Structured output for the tool caller role."""
+#     tool_call_intended: bool
 
 class TaggerResponse(BaseModel):
     """Structured output for the Tagger role."""
@@ -107,6 +110,35 @@ class TaggerResponse(BaseModel):
 class SummarizerResponse(BaseModel):
     """Structured output for the Summarizer role."""
     summary: str
+
+
+# ---------------------------------------------------------------------------
+# Deferral phrase detection — replaces the LLM-based ask_tool_intent classifier.
+# If the brain's round-0 text contains one of these phrases, we treat it as a
+# failed tool-call attempt and inject a forcing nudge.
+# ---------------------------------------------------------------------------
+
+_DEFERRAL_PHRASES: tuple[str, ...] = (
+    "let me look", "let me check", "let me take a look",
+    "let me search", "let me see", "let me pull up",
+    "let me go back", "let me dig", "let me find",
+    "i'll look", "i'll check", "i'll take a look",
+    "i'll search", "i'll pull up", "i'll go back",
+    "i'll find", "i'll dig",
+    "lemme look", "lemme check", "lemme see",
+    "let's see if", "let's find",
+    "gonna check", "gonna look",
+)
+
+
+def _looks_like_deferral(text: str) -> bool:
+    """Return True if text contains a phrase suggesting the model intended to
+    call a tool but produced conversational filler instead.
+
+    Case-insensitive substring match — fast, no LLM call needed.
+    """
+    lower = text.lower()
+    return any(phrase in lower for phrase in _DEFERRAL_PHRASES)
 
 
 # ---------------------------------------------------------------------------
@@ -205,36 +237,41 @@ class OllamaInterface:
     # ------------------------------------------------------------------
     # Tool Caller — is Sandy indicating that she wants to use a tool?
     # ------------------------------------------------------------------
-
-    async def ask_tool_intent(self, context: str) -> bool:
-        """Ask the tool caller wether Sandy intends to call a tool
-
-        context  — a string of the reply from the brain LLM
-
-        Returns True if Sandy intends to use a tool, False otherwise.
-        On any error, returns False (fail closed — don't respond if unsure).
-        """
-        prompt = SandyPrompt.tool_caller_prompt(context)
-        try:
-            async with self._lock:  # high-priority: always wait
-                response = await self._client.chat(
-                    model=_BRAIN_MODEL, # so it doesn't unload out of the vram
-                    messages=[
-                        {"role": "system", "content": prompt.system},
-                        {"role": "user",   "content": prompt.user},
-                    ],
-                    format=ToolCallerResponse.model_json_schema(),
-                    keep_alive=_KEEP_ALIVE,
-                )
-            result = ToolCallerResponse.model_validate_json(response.message.content)
-            logger.info(
-                "Tool caller intent → tool_call_intended=%s",
-                result.tool_call_intended
-            )
-            return result.tool_call_intended
-        except Exception as exc:
-            logger.error("Tool Intent error (defaulting to no-respond): %s", exc)
-            return False
+    #
+    # LLM-based classifier kept here for reference. Re-enable by:
+    #   1. Uncommenting ToolCallerResponse above.
+    #   2. Uncommenting this method.
+    #   3. Replacing `_looks_like_deferral(content_lower)` in ask_brain
+    #      with `await self.ask_tool_intent(content_lower)`.
+    #
+    # async def ask_tool_intent(self, context: str) -> bool:
+    #     """Ask the brain model whether a response indicates tool-call intent.
+    #
+    #     context — the text of the brain's round-0 reply.
+    #     Returns True if the model intended a tool call, False otherwise.
+    #     On any error, returns False (fail closed).
+    #     """
+    #     prompt = SandyPrompt.tool_caller_prompt(context)
+    #     try:
+    #         async with self._lock:
+    #             response = await self._client.chat(
+    #                 model=_BRAIN_MODEL,
+    #                 messages=[
+    #                     {"role": "system", "content": prompt.system},
+    #                     {"role": "user",   "content": prompt.user},
+    #                 ],
+    #                 format=ToolCallerResponse.model_json_schema(),
+    #                 keep_alive=_KEEP_ALIVE,
+    #             )
+    #         result = ToolCallerResponse.model_validate_json(response.message.content)
+    #         logger.info(
+    #             "Tool caller intent → tool_call_intended=%s",
+    #             result.tool_call_intended,
+    #         )
+    #         return result.tool_call_intended
+    #     except Exception as exc:
+    #         logger.error("Tool Intent error (defaulting to False): %s", exc)
+    #         return False
 
     # ------------------------------------------------------------------
     # Tagger — generate recall tags
@@ -399,7 +436,7 @@ class OllamaInterface:
                     # Round 0 text-only: check for deferral without tool call.
                     if _round == 0 and kwargs.get("tools"):
                         content_lower = (response.message.content or "").lower()
-                        if await self.ask_tool_intent(content_lower):
+                        if _looks_like_deferral(content_lower):
                             logger.info(
                                 "Brain deferred without calling a tool — injecting forcing nudge"
                             )
@@ -409,11 +446,12 @@ class OllamaInterface:
                             if send_fn and response.message.content:
                                 await send_fn(response.message.content)
                             # Keep the deferral in context so the model doesn't
-                            # contradict itself, but force it to act now.
+                            # contradict itself, then nudge via system so Sandy
+                            # doesn't interpret it as a user command to sass back.
                             full_messages.append(response.message)
                             full_messages.append({
-                                "role": "user",
-                                "content": "Please call your memory tools now.",
+                                "role": "system",
+                                "content": "You indicated you wanted to check your memories. Call one of your memory tools now — do not respond with text yet.",
                             })
                             kwargs["messages"] = full_messages
                             async with self._lock:

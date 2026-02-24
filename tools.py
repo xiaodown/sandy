@@ -119,8 +119,8 @@ def _format_messages(data: list[dict]) -> str:
 # Tool handlers — one async function per tool
 # ---------------------------------------------------------------------------
 
-async def _handle_get_chat_history(args: dict[str, Any]) -> str:
-    """Retrieve messages from Recall with optional filtering."""
+async def _handle_recall_recent(args: dict[str, Any]) -> str:
+    """Retrieve recent messages from Recall, optionally filtered by time window."""
     data = await _recall_get("/messages/", args)
     if data is None:
         return "Error: could not reach the memory store."
@@ -129,7 +129,27 @@ async def _handle_get_chat_history(args: dict[str, Any]) -> str:
     return f"{len(data)} message(s) retrieved:\n\n{_format_messages(data)}"
 
 
-async def _handle_search_messages(args: dict[str, Any]) -> str:
+async def _handle_recall_from_user(args: dict[str, Any]) -> str:
+    """Retrieve messages from Recall filtered to a specific author."""
+    data = await _recall_get("/messages/", args)
+    if data is None:
+        return "Error: could not reach the memory store."
+    if not data:
+        return f"No messages found from author: {args.get('author', '?')}"
+    return f"{len(data)} message(s) retrieved:\n\n{_format_messages(data)}"
+
+
+async def _handle_recall_by_topic(args: dict[str, Any]) -> str:
+    """Retrieve messages from Recall filtered to a topic tag."""
+    data = await _recall_get("/messages/", args)
+    if data is None:
+        return "Error: could not reach the memory store."
+    if not data:
+        return f"No messages found for topic: {args.get('tag', '?')}"
+    return f"{len(data)} message(s) retrieved:\n\n{_format_messages(data)}"
+
+
+async def _handle_search_memories(args: dict[str, Any]) -> str:
     """Full-text search through Recall messages."""
     # The model uses the parameter name 'query'; the Recall API uses 'q'.
     api_args = {**args}
@@ -154,24 +174,22 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "get_chat_history",
+            "name": "recall_recent",
             "description": (
-                "Retrieve past messages from this server's chat history. "
-                "Use this to recall what was discussed before your current "
-                "context window, or to check what someone said recently. "
-                "Filter by channel, author, tag, or time window."
+                "Use this to catch up on what's been happening — what people have "
+                "been talking about recently in the server. Good for 'what did I miss', "
+                "'what's been going on lately', or any time you want a feel for recent "
+                "activity without a specific topic or person in mind."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "author":      {"type": "string",  "description": "Filter by author display name (use the name as it appears in chat)"},
-                    "channel":     {"type": "string",  "description": "Filter by channel name (only use when explicitly asked about a specific channel)"},
-                    "tag":         {"type": "string",  "description": "Tag substring to filter by (e.g. 'game' matches 'gaming')"},
-                    "hours_ago":   {"type": "integer", "description": "Limit to messages from the last N hours"},
-                    "minutes_ago": {"type": "integer", "description": "Limit to messages from the last N minutes"},
+                    "hours_ago":   {"type": "integer", "description": "Look back N hours (e.g. 24 for the last day, 168 for the last week)"},
+                    "minutes_ago": {"type": "integer", "description": "Look back N minutes"},
                     "since":       {"type": "string",  "description": "ISO datetime lower bound (e.g. '2026-02-01T00:00:00')"},
                     "until":       {"type": "string",  "description": "ISO datetime upper bound"},
-                    "limit":       {"type": "integer", "description": "Maximum messages to return (default 100, max 1000)"},
+                    "channel":     {"type": "string",  "description": "Limit to a specific channel name (only use when explicitly asked)"},
+                    "limit":       {"type": "integer", "description": "Maximum messages to return (default 100)"},
                 },
                 "required": [],
             },
@@ -180,20 +198,66 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "search_messages",
+            "name": "recall_from_user",
             "description": (
-                "Full-text search through past messages on this server. "
-                "Uses stemmed matching, so 'run' finds 'running', 'ran', etc. "
-                "Use this to find messages about a specific topic or keyword."
+                "Use this when you want to remember what a specific person said or did. "
+                "Good for 'what has Dave been up to', 'what did Sarah say about X', "
+                "or any time a particular person's words or actions are relevant."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query":      {"type": "string",  "description": "Text to search for (stemmed, case-insensitive)"},
-                    "author":     {"type": "string",  "description": "Limit to a specific author display name (use the name as it appears in chat)"},
-                    "channel":    {"type": "string",  "description": "Limit to a specific channel name (only use when explicitly asked about a specific channel)"},
-                    "hours_ago":  {"type": "integer", "description": "Limit to the last N hours"},
-                    "limit":      {"type": "integer", "description": "Maximum messages to return (default 50)"},
+                    "author":    {"type": "string",  "description": "The person's display name as it appears in chat"},
+                    "hours_ago": {"type": "integer", "description": "Limit to the last N hours"},
+                    "since":     {"type": "string",  "description": "ISO datetime lower bound (e.g. '2026-02-01T00:00:00')"},
+                    "channel":   {"type": "string",  "description": "Limit to a specific channel name (only use when explicitly asked)"},
+                    "limit":     {"type": "integer", "description": "Maximum messages to return (default 50)"},
+                },
+                "required": ["author"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recall_by_topic",
+            "description": (
+                "Use this to remember past conversations around a theme or topic — "
+                "things like 'gaming', 'music', 'movies', 'work', or whatever tends "
+                "to come up. Each past message is tagged with topics it's about, and "
+                "this searches those tags. Works best when you have a clear theme in "
+                "mind rather than specific words."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tag":       {"type": "string",  "description": "The theme or topic to look up (e.g. 'gaming', 'music', 'food')"},
+                    "author":    {"type": "string",  "description": "Limit to a specific person"},
+                    "hours_ago": {"type": "integer", "description": "Limit to the last N hours"},
+                    "limit":     {"type": "integer", "description": "Maximum messages to return (default 50)"},
+                },
+                "required": ["tag"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_memories",
+            "description": (
+                "Use this to search for specific words, phrases, or concepts across "
+                "all past messages. Good for 'did anyone mention X', 'find the "
+                "conversation about Y', or when you need to dig for something specific. "
+                "Uses stemmed matching, so 'run' finds 'running', 'ran', etc."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query":     {"type": "string",  "description": "Words or phrase to search for"},
+                    "author":    {"type": "string",  "description": "Limit to a specific person"},
+                    "hours_ago": {"type": "integer", "description": "Limit to the last N hours"},
+                    "channel":   {"type": "string",  "description": "Limit to a specific channel name (only use when explicitly asked)"},
+                    "limit":     {"type": "integer", "description": "Maximum messages to return (default 50)"},
                 },
                 "required": ["query"],
             },
@@ -203,15 +267,19 @@ TOOL_SCHEMAS: list[dict] = [
 
 # Map tool name → handler function.
 _HANDLERS: dict[str, Any] = {
-    "get_chat_history": _handle_get_chat_history,
-    "search_messages":  _handle_search_messages,
+    "recall_recent":    _handle_recall_recent,
+    "recall_from_user": _handle_recall_from_user,
+    "recall_by_topic":  _handle_recall_by_topic,
+    "search_memories":  _handle_search_memories,
 }
 
 # Tools that query per-server data and require server_id injection.
 # A future tool like 'search_web' would NOT appear here.
 _SERVER_SCOPED_TOOLS: frozenset[str] = frozenset({
-    "get_chat_history",
-    "search_messages",
+    "recall_recent",
+    "recall_from_user",
+    "recall_by_topic",
+    "search_memories",
 })
 
 

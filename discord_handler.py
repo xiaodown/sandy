@@ -93,9 +93,8 @@ async def on_message(message: discord.Message):
     # over the background tagging/summarization that fires afterward.
     history = cache.get(message.guild.id, message.channel.id)
 
-    # Fast-path: if Sandy is directly named or @mentioned, skip the bouncer entirely.
-    # This catches "hey Sandy", "sandy can you...", "@sandy-test", etc. deterministically
-    # without relying on the small model to get it right.
+    # Call the bouncer to determine if it makes logical sense for Sandy to respond, given
+    # the last10 context.
     should_respond = await llm.ask_bouncer(history.format(), bot_name=bot.user.display_name)
 
     if should_respond:
