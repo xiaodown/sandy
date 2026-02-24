@@ -318,10 +318,15 @@ async def dispatch(
 
     # Log without server context to keep logs tidy (it's always the same value).
     loggable = {k: v for k, v in arguments.items() if k not in ("server_id",)}
-    logger.info("Tool dispatch → %s(%s)", tool_name, loggable)
+    logger.info("Sandy is using tool: %s  args=%s", tool_name, loggable)
 
     try:
-        return await handler(arguments)
+        result = await handler(arguments)
+        # Log first line of result so it's easy to see what came back without
+        # flooding the log with full message dumps.
+        first_line = result.splitlines()[0] if result else "(empty)"
+        logger.info("Tool %s returned: %s", tool_name, first_line)
+        return result
     except Exception as exc:
         logger.error("Tool %r raised: %s", tool_name, exc)
         return f"Error executing {tool_name}: {exc}"
