@@ -119,6 +119,7 @@ class SummarizerResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 _DEFERRAL_PHRASES: tuple[str, ...] = (
+    # service-framing (old model, kept for safety)
     "let me look", "let me check", "let me take a look",
     "let me search", "let me see", "let me pull up",
     "let me go back", "let me dig", "let me find",
@@ -128,6 +129,13 @@ _DEFERRAL_PHRASES: tuple[str, ...] = (
     "lemme look", "lemme check", "lemme see",
     "let's see if", "let's find",
     "gonna check", "gonna look",
+    # memory/introspection framing (prompted style)
+    "hang on", "give me a sec", "give me a moment",
+    "trying to think", "trying to remember", "trying to recall",
+    "i'm thinking", "let me think",
+    "wait, wasn't", "wait, didn't", "wasn't there something",
+    "i think i remember", "i vaguely remember",
+    "check my", "check the log", "check back",
 )
 
 
@@ -517,7 +525,7 @@ class OllamaInterface:
                             # user message so the template injects tools again.
                             full_messages.append({
                                 "role": "user",
-                                "content": "Use one of your memory tools now.",
+                                "content": "Use one of your memory tools to recall this — don't respond until you've checked.",
                             })
                             kwargs["messages"] = full_messages
                             async with self._lock:
