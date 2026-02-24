@@ -433,17 +433,20 @@ class OllamaInterface:
 
             for _round in range(_tools.MAX_TOOL_ROUNDS):
                 if not response.message.tool_calls:
-                    # Round 0 text-only: check for deferral without tool call.
-                    if _round == 0 and kwargs.get("tools"):
+                    # No tool call this round — check for deferral on any round.
+                    # The model can say "lemme think" after a tool result too,
+                    # e.g. "didn't find it, let me check differently".
+                    if kwargs.get("tools"):
                         content_lower = (response.message.content or "").lower()
                         if _looks_like_deferral(content_lower):
                             logger.info(
-                                "Brain deferred without calling a tool — injecting forcing nudge"
+                                "Brain deferred without calling a tool (round %d) — injecting forcing nudge",
+                                _round,
                             )
-                            # Send the deferral text to Discord immediately so
-                            # the user sees Sandy's intent while the tool call
-                            # and final reply are still generating.
-                            if send_fn and response.message.content:
+                            # Only send the deferral text to Discord on the first
+                            # round — we don't want multiple mid-loop messages
+                            # appearing in the channel.
+                            if _round == 0 and send_fn and response.message.content:
                                 await send_fn(response.message.content)
                             # Keep the deferral in context so the model doesn't
                             # contradict itself, then nudge via system so Sandy
