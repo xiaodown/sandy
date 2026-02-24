@@ -482,9 +482,10 @@ class OllamaInterface:
                                 reason, _round,
                             )
                             # Only send the deferral text to Discord on the first
-                            # round — we don't want multiple mid-loop messages
-                            # appearing in the channel.
-                            if _round == 0 and send_fn and response.message.content:
+                            # round, and only when it's a human-readable deferral
+                            # phrase — not when it's a raw JSON tool call blob,
+                            # which is ugly and confusing to users.
+                            if _round == 0 and send_fn and response.message.content and is_deferral and not is_failed_call:
                                 await send_fn(response.message.content)
                             # Keep the deferral in context so the model doesn't
                             # contradict itself, then nudge via system so Sandy
@@ -507,6 +508,16 @@ class OllamaInterface:
                             full_messages.append({
                                 "role": "system",
                                 "content": nudge,
+                            })
+                            # Mistral's chat template only injects [AVAILABLE_TOOLS]
+                            # into the last 2 user-role messages. Once we append the
+                            # assistant deferral + system nudge above, the original
+                            # user message is no longer near the end and the model
+                            # stops seeing its tool schemas. Fix: always end with a
+                            # user message so the template injects tools again.
+                            full_messages.append({
+                                "role": "user",
+                                "content": "Use one of your memory tools now.",
                             })
                             kwargs["messages"] = full_messages
                             async with self._lock:
