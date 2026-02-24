@@ -113,6 +113,12 @@ class MemoryClient:
                 server_id   = message.guild.id,
                 timestamp   = message.created_at,
             )
+            logger.info(
+                "Sent message to RAG from %s in %s/%s", 
+                message.author.display_name,
+                message.guild.name,
+                message.channel.name
+            )
 
         logger.info(
             "Stored message from %s in %s/%s — tags=%r summary=%s stored=%s",
