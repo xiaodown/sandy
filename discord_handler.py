@@ -25,6 +25,7 @@ from registry import Registry
 from last10 import Last10, resolve_mentions
 from memory import MemoryClient
 from ollama_interface import OllamaInterface
+from vector_memory import VectorMemory
 import tools
 
 load_dotenv()
@@ -43,7 +44,8 @@ logging.getLogger("discord").propagate = False
 registry = Registry()
 cache = Last10(maxlen=10, registry=registry)
 llm = OllamaInterface()
-memory = MemoryClient(llm=llm)
+vector_memory = VectorMemory()
+memory = MemoryClient(llm=llm, vector_memory=vector_memory)
 
 # Guard so cache seeding only runs once, even if on_ready fires on reconnect.
 _cache_seeded = False
@@ -103,6 +105,13 @@ async def on_message(message: discord.Message):
         # and refreshes it every 5 seconds automatically until the block exits.
         async with message.channel.typing():
             ollama_history = history.to_ollama_messages(bot.user.id)
+            # Query the vector store for semantically similar past messages.
+            # This happens before the brain call so results can be injected
+            # into the system prompt as ambient background memory.
+            rag_context = await vector_memory.query(
+                message.content,
+                server_id=message.guild.id,
+            )
             reply = await llm.ask_brain(
                 ollama_history,
                 bot_name=bot.user.display_name,
@@ -111,6 +120,7 @@ async def on_message(message: discord.Message):
                 server_id=message.guild.id,
                 tools=tools.TOOL_SCHEMAS,
                 send_fn=message.channel.send,
+                rag_context=rag_context,
             )
 
             if reply:

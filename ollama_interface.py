@@ -350,6 +350,7 @@ class OllamaInterface:
         server_id: int = 0,
         tools: Optional[list] = None,
         send_fn: Optional[Callable] = None,
+        rag_context: Optional[str] = None,
     ) -> Optional[str]:
         """Generate a response from the Brain model.
 
@@ -366,6 +367,10 @@ class OllamaInterface:
                        the deferral text when Sandy says "let me check" without
                        calling a tool. Lets the user see Sandy's intent while
                        the tool call and final reply are still in flight.
+        rag_context  — optional pre-formatted block of semantically similar past
+                       messages from VectorMemory.query().  Injected into the
+                       system prompt as background awareness before the conversation
+                       history.  Empty string or None → no injection.
 
         Returns the response text, or None on error.
         """
@@ -381,8 +386,17 @@ class OllamaInterface:
         # conversation history already ends with a user turn (i.e. always), which
         # causes models that expect strict user/assistant alternation to enter
         # "completion mode" and echo the entire context back in their reply.
+        system_content = f"{prompt.system}\n\n{prompt.user}"
+        if rag_context:
+            # Inject semantically similar past messages as ambient background
+            # awareness.  Framed as Sandy's own remembered fragments so she
+            # treats them as first-person memory, not external data.
+            system_content += (
+                "\n\n## Fragments from your memory that may be relevant\n"
+                + rag_context
+            )
         full_messages = (
-            [{"role": "system", "content": f"{prompt.system}\n\n{prompt.user}"}]
+            [{"role": "system", "content": system_content}]
             + messages
         )
         try:
