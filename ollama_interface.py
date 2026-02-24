@@ -141,6 +141,23 @@ def _looks_like_deferral(text: str) -> bool:
     return any(phrase in lower for phrase in _DEFERRAL_PHRASES)
 
 
+# Tool names extracted from the schema so this stays in sync automatically.
+_TOOL_NAMES: frozenset[str] = frozenset(
+    s["function"]["name"] for s in _tools.TOOL_SCHEMAS
+)
+
+
+def _looks_like_failed_tool_call(text: str) -> bool:
+    """Return True if text mentions a tool name without an actual tool call.
+
+    This catches the failure mode where the model knows it should call a tool
+    and even picks the right one, but emits it as plain text (e.g. '[Sandy]
+    recall_recent 10 minutes') instead of via the function-calling API.
+    """
+    lower = text.lower()
+    return any(name in lower for name in _TOOL_NAMES)
+
+
 # ---------------------------------------------------------------------------
 # Main interface
 # ---------------------------------------------------------------------------
@@ -452,10 +469,17 @@ class OllamaInterface:
                     # e.g. "didn't find it, let me check differently".
                     if kwargs.get("tools"):
                         content_lower = (response.message.content or "").lower()
-                        if _looks_like_deferral(content_lower):
+                        is_deferral     = _looks_like_deferral(content_lower)
+                        is_failed_call  = _looks_like_failed_tool_call(content_lower)
+                        if is_deferral or is_failed_call:
+                            reason = (
+                                "expressed tool call as plain text"
+                                if is_failed_call
+                                else "used deferral phrase"
+                            )
                             logger.info(
-                                "Brain deferred without calling a tool (round %d) — injecting forcing nudge",
-                                _round,
+                                "Brain %s without calling a tool (round %d) — injecting forcing nudge",
+                                reason, _round,
                             )
                             # Only send the deferral text to Discord on the first
                             # round — we don't want multiple mid-loop messages
@@ -465,10 +489,24 @@ class OllamaInterface:
                             # Keep the deferral in context so the model doesn't
                             # contradict itself, then nudge via system so Sandy
                             # doesn't interpret it as a user command to sass back.
+                            # Escalate nudge strength on subsequent rounds.
+                            if _round == 0:
+                                nudge = (
+                                    "You indicated you wanted to check your memories. "
+                                    "Call one of your memory tools now — do not respond with text yet."
+                                )
+                            else:
+                                nudge = (
+                                    "You must use your function-calling capability. "
+                                    "Do NOT generate a text response. "
+                                    "Invoke one of your memory tools (recall_recent, recall_from_user, "
+                                    "recall_by_topic, or search_memories) right now. "
+                                    "A text reply without a preceding tool call is not acceptable."
+                                )
                             full_messages.append(response.message)
                             full_messages.append({
                                 "role": "system",
-                                "content": "You indicated you wanted to check your memories. Call one of your memory tools now — do not respond with text yet.",
+                                "content": nudge,
                             })
                             kwargs["messages"] = full_messages
                             async with self._lock:
