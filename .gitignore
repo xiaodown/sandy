@@ -5,6 +5,7 @@ history/database/
 notes
 .env
 data/*
+*.swp
 
 
 # Byte-compiled / optimized / DLL files
