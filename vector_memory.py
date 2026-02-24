@@ -125,6 +125,10 @@ class VectorMemory:
                     "timestamp":   ts_str,
                 }],
             )
+            logger.debug(
+                "VectorMemory.add_message stored id=%s server=%d author=%r",
+                message_id, server_id, author_name,
+            )
         except Exception as exc:
             logger.error("VectorMemory.add_message failed (id=%s): %s", message_id, exc)
 
@@ -185,6 +189,11 @@ class VectorMemory:
 
             if lines:
                 logger.debug("VectorMemory.query → %d result(s) for server %d", len(lines), server_id)
+            else:
+                logger.debug(
+                    "VectorMemory.query → 0 result(s) within threshold (%.2f) for server %d",
+                    _MAX_DISTANCE, server_id,
+                )
             return "\n".join(lines)
         except Exception as exc:
             logger.error("VectorMemory.query failed: %s", exc)
