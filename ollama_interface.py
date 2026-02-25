@@ -8,29 +8,24 @@ Wraps the four LLM roles Sandy uses:
     Tagger     — small model; generates 1-3 recall tags for a message
     Summarizer — small model; optionally summarises long messages before recall
 
-Two models are in use:
-
-    Brain + Bouncer — qwen2.5:14b (~9.0 GB, 24 GB VRAM machine)
-        Tool-capable model for personality / reasoning / tool-calling and
-        bouncer decisions. Same weights serve both roles; ollama keeps one
-        copy in VRAM. Replaced gemma3:12b-it-qat (no tool support) and
-        the 3B bouncer (insufficient contextual reasoning).
-        https://ollama.com/library/qwen2.5
-
-    Tagger + Summarizer — Llama-3.2-3B-Instruct Q8_0 (~3.4 GB)
-        Lightweight model for structured outputs only (tags, summaries).
-        Q8_0 chosen over Q4_K_M for better boolean/JSON coherence.
-        https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
-
+All four roles currently use mistral-small to avoid VRAM thrashing.
 Model names are read from the root .env:
-    BRAIN_MODEL       (large model)
-    BOUNCER_MODEL     (small model)
-    TAGGER_MODEL      (small model)
-    SUMMARIZER_MODEL  (small model)
+    BRAIN_MODEL       (default: mistral-small)
+    BOUNCER_MODEL     (default: mistral-small)
+    TAGGER_MODEL      (default: mistral-small)
+    SUMMARIZER_MODEL  (default: mistral-small)
+    EMBED_MODEL       (default: mxbai-embed-large — separate, for ChromaDB)
 
 Structured outputs (bouncer / tagger / summarizer) use ollama's format= parameter
 with a Pydantic schema, which is far more reliable than asking the model to emit
 valid JSON by itself.
+
+Known Mistral quirks:
+  - Chat template only injects [AVAILABLE_TOOLS] when a user message is in the
+    last 2 positions. The deferral nudge loop always appends a trailing user
+    message to keep tool schemas visible.
+  - Model occasionally emits tool calls as plain text instead of via the API.
+    _looks_like_failed_tool_call() catches this and triggers a nudge.
 """
 
 import asyncio
@@ -498,8 +493,15 @@ class OllamaInterface:
                     # The model can say "lemme think" after a tool result too,
                     # e.g. "didn't find it, let me check differently".
                     if kwargs.get("tools"):
-                        content_lower = (response.message.content or "").lower()
-                        is_deferral     = _looks_like_deferral(content_lower)
+                        content = response.message.content or ""
+                        content_lower = content.lower()
+                        # Only treat as an incomplete deferral if the response is
+                        # short. A long response that opens with "hmm, let me think"
+                        # and then delivers a full answer (often from RAG context)
+                        # should be treated as a complete reply, not a failed tool
+                        # call. 150 chars accommodates the phrase + a sentence of
+                        # actual answer before we decide it's substantive enough.
+                        is_deferral     = _looks_like_deferral(content_lower) and len(content) < 150
                         is_failed_call  = _looks_like_failed_tool_call(content_lower)
                         if is_deferral or is_failed_call:
                             reason = (
@@ -515,7 +517,7 @@ class OllamaInterface:
                             # round, and only when it's a human-readable deferral
                             # phrase — not when it's a raw JSON tool call blob,
                             # which is ugly and confusing to users.
-                            if _round == 0 and send_fn and response.message.content and is_deferral and not is_failed_call:
+                            if _round == 0 and send_fn and content and is_deferral and not is_failed_call:
                                 await send_fn(response.message.content)
                             # Keep the deferral in context so the model doesn't
                             # contradict itself, then nudge via system so Sandy
