@@ -209,6 +209,27 @@ class OllamaInterface:
             logger.warning("ollama health check failed: %s", exc)
             return False
 
+    # -----------------------------------------------------------------
+    # Warmer - force ollama to load a model into vram when on_ready
+    # -----------------------------------------------------------------
+    
+    async def warm_model(self, model_name):
+        """
+        Sends an empty prompt to the ollama api to load a model into vram, 
+        reducing the time it takes for the first response after restart
+        (i mean not really but you know what warming does)
+        """
+        try:
+            _ = ollama.generate(
+                model=model_name,
+                prompt=""
+            )
+            return True
+        except Exception as e:
+            logger.error("Error occured when warming %s: %s", 
+                         model_name, e)
+            return False
+
     # ------------------------------------------------------------------
     # Bouncer — should Sandy respond?
     # ------------------------------------------------------------------

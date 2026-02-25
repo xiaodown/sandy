@@ -6,6 +6,7 @@ notes
 .env
 data/*
 *.swp
+handover*
 
 
 # Byte-compiled / optimized / DLL files

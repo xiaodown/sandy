@@ -55,11 +55,28 @@ _cache_seeded = False
 async def on_ready():
     """Event handler for when the bot is ready."""
     global _cache_seeded
+    PREWARM_MODEL = os.getenv("PREWARM_MODEL")
+    PREWARM_MODEL_NAME = os.getenv("PREWARM_MODEL_NAME")
+
     logger.info("Logged in as %s (%s)", bot.user.name, bot.user.id)
     if not _cache_seeded:
         seeded = await memory.seed_cache(cache)
         logger.info("Cache seeded with %d message(s) from Recall", seeded)
         _cache_seeded = True
+        if PREWARM_MODEL == "True":
+            logger.info("Beginning pre-warming of model...")
+            if await llm.warm_model(PREWARM_MODEL_NAME):
+                logger.info("Pre-warming model %s complete", PREWARM_MODEL_NAME)
+            else:
+                logger.warning("Pre-warming of model %s failed", PREWARM_MODEL_NAME)
+        ready_info=f"       ###   BOT READY   ###\n\n"
+        ready_info+=f"      * bot logged in as {bot.user.name} ({bot.user.id})\n"
+        guild_count = 0
+        for guild in bot.guilds:
+            ready_info+=f"      * attached to {guild.name} ({guild.id})\n"
+            guild_count = guild_count + 1
+        ready_info+=f"      * {bot.user.name} is on {str(guild_count)} servers\n"
+        logger.warning("\n\n%s", ready_info)
 
 
 @bot.event
@@ -153,4 +170,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
+        logger.info("^c caught - stand by, shutting down cleanly...")
         pass  # Ctrl+C — clean shutdown already handled in main()'s finally block
