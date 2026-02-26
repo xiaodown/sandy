@@ -163,6 +163,20 @@ async def _handle_search_memories(args: dict[str, Any]) -> str:
     return f"{len(data)} message(s) found:\n\n{_format_messages(data)}"
 
 
+async def _handle_get_current_time(_args: dict[str, Any]) -> str:
+    """Return the current date and time in Pacific time."""
+    now = datetime.now(_PACIFIC)
+    day = now.day
+    suffix = (
+        "th" if 11 <= day <= 13
+        else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    )
+    return (
+        f"Today is {now.strftime('%A, %B')} {day}{suffix}, {now.year}. "
+        f"The current time is {now.strftime('%I:%M %p')} {now.strftime('%Z')}."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tool schemas — passed verbatim to ollama as tools=
 #
@@ -263,6 +277,23 @@ TOOL_SCHEMAS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_time",
+            "description": (
+                "Returns the current date and time. Use this when you need to know "
+                "exactly what time or date it is right now — for example, to answer "
+                "'what time is it', to work out what day of the week it is, or to "
+                "calculate how long ago something happened."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
 ]
 
 # Map tool name → handler function.
@@ -271,6 +302,7 @@ _HANDLERS: dict[str, Any] = {
     "recall_from_user": _handle_recall_from_user,
     "recall_by_topic":  _handle_recall_by_topic,
     "search_memories":  _handle_search_memories,
+    "get_current_time": _handle_get_current_time,
 }
 
 # Tools that query per-server data and require server_id injection.
