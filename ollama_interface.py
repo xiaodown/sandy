@@ -525,15 +525,14 @@ class OllamaInterface:
                             # Escalate nudge strength on subsequent rounds.
                             if _round == 0:
                                 nudge = (
-                                    "You indicated you wanted to check your memories. "
-                                    "Call one of your memory tools now — do not respond with text yet."
+                                    "You indicated you wanted to use a tool. "
+                                    "Call the appropriate tool now — do not respond with text yet."
                                 )
                             else:
                                 nudge = (
                                     "You must use your function-calling capability. "
                                     "Do NOT generate a text response. "
-                                    "Invoke one of your memory tools (recall_recent, recall_from_user, "
-                                    "recall_by_topic, or search_memories) right now. "
+                                    "Invoke one of your available tools right now. "
                                     "A text reply without a preceding tool call is not acceptable."
                                 )
                             full_messages.append(response.message)
@@ -549,7 +548,7 @@ class OllamaInterface:
                             # user message so the template injects tools again.
                             full_messages.append({
                                 "role": "user",
-                                "content": "Use one of your memory tools to recall this — don't respond until you've checked.",
+                                "content": "Use one of your tools now — don't respond until you've checked.",
                             })
                             kwargs["messages"] = full_messages
                             async with self._lock:

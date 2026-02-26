@@ -37,6 +37,11 @@ _RECALL_BASE = (
     f":{os.getenv('RECALL_PORT', '8000')}"
 )
 
+_SEARXNG_BASE = (
+    f"http://{os.getenv('SEARXNG_HOST', '127.0.0.1')}"
+    f":{os.getenv('SEARXNG_PORT', '8888')}"
+)
+
 _PACIFIC = ZoneInfo("America/Los_Angeles")
 
 # Registry for resolving current nicknames from stored author_id + server_id.
@@ -177,6 +182,49 @@ async def _handle_get_current_time(_args: dict[str, Any]) -> str:
     )
 
 
+async def _handle_search_web(args: dict[str, Any]) -> str:
+    """Search the web via SearXNG and return a formatted snippet block."""
+    query = args.get("query", "").strip()
+    if not query:
+        return "Error: no search query provided."
+    n = min(int(args.get("n_results", 5)), 10)  # cap at 10 cause i'm not made of vram
+    params = {
+        "q": query,
+        "format": "json",
+        "categories": "general",
+        "language": "en",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(
+                f"{_SEARXNG_BASE}/search",
+                params=params,
+                headers={"Accept": "application/json"},
+            )
+            r.raise_for_status()
+            data = r.json()
+    except Exception as exc:
+        logger.error("SearXNG error (query=%r): %s", query, exc)
+        return f"Error reaching web search: {exc}"
+
+    results = data.get("results", [])[:n]
+    if not results:
+        return f"No web results found for: {query}"
+
+    lines = []
+    for i, res in enumerate(results, 1):
+        title   = res.get("title", "(no title)")
+        url     = res.get("url", "")
+        snippet = (res.get("content") or "").strip()
+        # Truncate long snippets — we don't need the full page, just enough context.
+        if len(snippet) > 300:
+            snippet = snippet[:300].rsplit(" ", 1)[0] + "…"
+        lines.append(f"{i}. {title}\n   {url}")
+        if snippet:
+            lines.append(f"   {snippet}")
+    return f"Web search results for '{query}':\n\n" + "\n\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Tool schemas — passed verbatim to ollama as tools=
 #
@@ -280,6 +328,26 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "search_web",
+            "description": (
+                "Search the web for current information. Use this when you need to look "
+                "something up that you don't know or that may have changed — news, facts, "
+                "people, places, recent events, anything. Returns titles, URLs, and short "
+                "snippets from real search results."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query":     {"type": "string",  "description": "What to search for"},
+                    "n_results": {"type": "integer", "description": "Number of results to return (default 5, max 10)"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_current_time",
             "description": (
                 "Returns the current date and time. Use this when you need to know "
@@ -303,6 +371,7 @@ _HANDLERS: dict[str, Any] = {
     "recall_by_topic":  _handle_recall_by_topic,
     "search_memories":  _handle_search_memories,
     "get_current_time": _handle_get_current_time,
+    "search_web":       _handle_search_web,
 }
 
 # Tools that query per-server data and require server_id injection.
