@@ -140,7 +140,8 @@ class VectorMemory:
         self,
         text: str,
         server_id: int,
-        n_results: int = 5,
+        #n_results: int = 5,
+        n_results: int = 8,  # trying to give her a bit more context
     ) -> str:
         """Return a formatted block of semantically similar past messages.
 
