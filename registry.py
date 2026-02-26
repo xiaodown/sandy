@@ -41,6 +41,7 @@ class Registry:
         return conn
 
     def _initialize_db(self) -> None:
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         with self._get_conn() as conn:
             conn.execute(
                 """
