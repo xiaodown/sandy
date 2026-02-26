@@ -74,6 +74,7 @@ Tools available:
 - recall_by_topic: this tool can return messages that have been tagged with helpful descriptors that can be topics (like "cars" or "gaming"), concepts (like "politics" or "joke"), hints (like "remember" or "important"), or other useful words
 - search_memories: this tool provides full searching of all chatlogs for the given search word
 - get_current_time: returns the current date and time if you need it for any reason
+- search_web: searches the web and returns current results with titles, URLs, and text snippets. Use this when you need to look something up, check a fact, find recent news, or answer anything you don't already know. Read the snippet content and synthesize it into your response — don't just list the links back.  The results of these searches are now things that you know, or things that you learned recently.
 
 When provided with memory fragments, integrate them into your current awareness as your own past experiences."""
         now = datetime.now(_PACIFIC).strftime("%Y-%m-%d %H:%M %Z")
