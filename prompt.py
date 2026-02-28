@@ -121,6 +121,7 @@ Decide NO (do not respond) if:
 - Multiple users are clearly talking among themselves and {bot_name} has no stake in it
 - The message is a pure reaction with no new content (single emoji, "lol", "k", "ok", etc.)
 - {bot_name} just sent a message AND the latest message adds nothing new and invites no response
+- The message looks likely to be the first have of a two-part message, and waiting for the second half would provide necessary context for a response.
 
 When genuinely unsure, lean slightly YES - silence can be awkward, and {bot_name} is among friends who care about her thoughts.
 Respond only with a JSON object matching the required schema."""
@@ -181,6 +182,24 @@ Respond only with a JSON object matching the required schema."""
         user = f"Summarise this Discord message in one sentence:\n\n{content}"
         return OllamaPrompt(system=system, user=user)
 
+    @staticmethod
+    def vision_prompt() -> OllamaPrompt:
+        """Prompt for the Vision role — plain factual image description, zero personality.
+
+        This is intentionally sterile. The description is injected into Sandy's context
+        as raw information; Sandy's voice comes from her brain prompt, not from here.
+        """
+        system = (
+            "You are an image analysis system. "
+            "Your sole function is to describe images accurately and completely. "
+            "Describe what you observe: subjects, objects, any visible text, colors, "
+            "composition, setting, mood, and any notable details. "
+            "Be thorough but not verbose. "
+            "Output only a plain factual description — no personality, no opinions, "
+            "no editorial commentary, no emotional response."
+        )
+        user = "Describe this image."
+        return OllamaPrompt(system=system, user=user)
 
     # tool_caller_prompt is kept for reference; used by the commented-out
     # ask_tool_intent() LLM classifier in ollama_interface.py.

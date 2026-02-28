@@ -14,15 +14,18 @@ Probably more to come.
 """
 
 
-import discord
 import asyncio
+import io
 import os
-from dotenv import load_dotenv
 import logging
+
+import discord
+from dotenv import load_dotenv
+from PIL import Image
 
 from logconf import get_logger
 from registry import Registry
-from last10 import Last10, resolve_mentions
+from last10 import Last10, resolve_mentions, SyntheticMessage, _SyntheticAuthor, _SyntheticGuild, _SyntheticChannel
 from memory import MemoryClient
 from ollama_interface import OllamaInterface
 from vector_memory import VectorMemory
@@ -49,6 +52,103 @@ memory = MemoryClient(llm=llm, vector_memory=vector_memory)
 
 # Guard so cache seeding only runs once, even if on_ready fires on reconnect.
 _cache_seeded = False
+
+# ---------------------------------------------------------------------------
+# Image attachment handling
+# ---------------------------------------------------------------------------
+
+# Whitelisted image MIME types for vision analysis.
+# SVG is intentionally excluded: it's an XML vector format that vision models
+# can't render, and it's a documented CVE magnet. Same reasoning for PDF etc.
+_VISION_CONTENT_TYPES: frozenset[str] = frozenset({
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+})
+
+# Skip files over this size — avoids downloading huge uploads on slow connections.
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20 MB
+
+
+async def _describe_attachments(message: discord.Message) -> list[str]:
+    """Download and describe all image attachments in a Discord message.
+
+    Returns a list of description strings, one per successfully processed
+    image. Non-image attachments and oversized files are silently skipped.
+    Order matches attachment order in the message.
+    """
+    descriptions: list[str] = []
+    for attachment in message.attachments:
+        # Use Discord's own content_type — it's set server-side and reliable.
+        # Split on ';' to strip any charset/boundary params.
+        content_type = (attachment.content_type or "").split(";")[0].strip().lower()
+        if content_type not in _VISION_CONTENT_TYPES:
+            logger.debug(
+                "Skipping attachment %s (type %s — not a supported image format)",
+                attachment.filename, content_type or "unknown",
+            )
+            continue
+        if attachment.size > _MAX_IMAGE_BYTES:
+            logger.warning(
+                "Skipping oversized image %s (%d MB)",
+                attachment.filename, attachment.size // (1024 * 1024),
+            )
+            continue
+        try:
+            image_bytes = await attachment.read()
+        except Exception as exc:
+            logger.error("Failed to download attachment %s: %s", attachment.filename, exc)
+            continue
+        # WebP causes a 500 from ollama's vision runner — convert to JPEG in
+        # memory first. Pillow handles all our whitelisted formats so this is
+        # safe to do unconditionally, but we only bother for WebP since the
+        # others work fine as-is.
+        if content_type == "image/webp":
+            try:
+                with Image.open(io.BytesIO(image_bytes)) as img:
+                    buf = io.BytesIO()
+                    img.convert("RGB").save(buf, format="JPEG", quality=90)
+                    image_bytes = buf.getvalue()
+                logger.debug("Converted WebP→JPEG for %s", attachment.filename)
+            except Exception as exc:
+                logger.error("WebP conversion failed for %s: %s", attachment.filename, exc)
+                continue
+        desc = await llm.ask_vision(image_bytes)
+        if desc:
+            descriptions.append(desc)
+            logger.info(
+                "Vision described %s: %s", attachment.filename, desc[:80] + ("…" if len(desc) > 80 else "")
+            )
+        else:
+            logger.warning("Vision returned nothing for %s", attachment.filename)
+    return descriptions
+
+
+def _build_augmented_content(message: discord.Message, descriptions: list[str]) -> str:
+    """Compose augmented message content with image descriptions injected.
+
+    Format varies based on whether the message had text and how many images:
+      - text + 1 image:  "<original text>\n[<name> also attached an image: <desc>]"
+      - text + N images: "<original text>\n[<name> also attached N images]\n[Image 1: ...]..."
+      - pure image(s):   "[<name> pasted an image/N images]\n[Image: <desc>]..."
+    """
+    name = message.author.display_name
+    original = resolve_mentions(message.content, message.mentions).strip()
+    n = len(descriptions)
+
+    if n == 1:
+        desc = descriptions[0]
+        if original:
+            return f"{original}\n[{name} also attached an image: {desc}]"
+        else:
+            return f"[{name} pasted an image into the chat]\n[Image: {desc}]"
+    else:
+        image_lines = "\n".join(f"[Image {i}: {d}]" for i, d in enumerate(descriptions, 1))
+        if original:
+            return f"{original}\n[{name} also attached {n} images]\n{image_lines}"
+        else:
+            return f"[{name} pasted {n} images into the chat]\n{image_lines}"
 
 
 @bot.event
@@ -91,19 +191,49 @@ async def on_message(message: discord.Message):
     # Note: bot's own messages are included — they're part of the conversation context
     # registry.ensure_seen() uses sqlite3 (blocking I/O), so run it in a thread.
     asyncio.create_task(asyncio.to_thread(registry.ensure_seen, message))
-    
 
-    # Add to the short-term in-memory rolling cache
-    cache.add(message)
-
-    logger.info("[%s/%s] %s: %s", message.guild.name, message.channel.name, message.author.display_name, resolve_mentions(message.content, message.mentions))
+    logger.info(
+        "[%s/%s] %s%s: %s",
+        message.guild.name, message.channel.name, message.author.display_name,
+        f" [{len(message.attachments)} attachment(s)]" if message.attachments else "",
+        resolve_mentions(message.content, message.mentions),
+    )
 
     if message.author.bot:
         # Store bot messages (including Sandy's own replies) in Recall and last10
         # so they appear in conversation history, but skip bouncer/brain entirely.
         logger.debug("Bot message from %s — storing and skipping pipeline", message.author.display_name)
+        cache.add(message)
         asyncio.create_task(memory.process_and_store(message))
         return
+
+    # --- Image attachment processing -----------------------------------
+    # Describe any image attachments before adding to cache, so the
+    # bouncer and brain both see the image content in context.
+    # The original message is always passed to process_and_store — Recall
+    # stores what was actually said, not our augmented version.
+    image_descriptions = await _describe_attachments(message)
+    if image_descriptions:
+        augmented_content = _build_augmented_content(message, image_descriptions)
+        cache_message = SyntheticMessage(
+            content=augmented_content,
+            created_at=message.created_at,
+            author=_SyntheticAuthor(
+                id=message.author.id,
+                display_name=message.author.display_name,
+                bot=message.author.bot,
+            ),
+            guild=_SyntheticGuild(id=message.guild.id, name=message.guild.name),
+            channel=_SyntheticChannel(id=message.channel.id, name=message.channel.name),
+            mentions=message.mentions,
+        )
+        cache.add(cache_message)
+        # Use augmented content for RAG so image-only messages still get
+        # a meaningful semantic query (message.content would be empty).
+        rag_query_text = augmented_content
+    else:
+        cache.add(message)
+        rag_query_text = message.content
 
     # --- Bouncer / Brain pipeline (awaited) ----------------------------
     # Ask the bouncer if Sandy should respond, given the recent context.
@@ -126,7 +256,7 @@ async def on_message(message: discord.Message):
             # This happens before the brain call so results can be injected
             # into the system prompt as ambient background memory.
             rag_context = await vector_memory.query(
-                message.content,
+                rag_query_text,
                 server_id=message.guild.id,
             )
             reply = await llm.ask_brain(
@@ -152,7 +282,9 @@ async def on_message(message: discord.Message):
     # Now that the LLM is free, tag and store the message in the background.
     # process_and_store will await the lock, so if another message's pipeline
     # fires concurrently the tagger/summarizer will queue behind it cleanly.
-    asyncio.create_task(memory.process_and_store(message))
+    # Pass image_descriptions so Recall and RAG store the description text
+    # rather than an empty content field.
+    asyncio.create_task(memory.process_and_store(message, image_descriptions=image_descriptions))
 
 
 if __name__ == "__main__":

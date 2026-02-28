@@ -66,6 +66,11 @@ _BRAIN_TEMPERATURE = float(os.getenv("BRAIN_TEMPERATURE", "1.1"))
 _BRAIN_NUM_PREDICT = int(os.getenv("BRAIN_NUM_PREDICT", "512"))
 _BRAIN_NUM_CTX     = int(os.getenv("BRAIN_NUM_CTX", "8192"))
 
+# Vision model — describes image attachments. Defaults to brain model so no extra
+# VRAM is consumed. Override with VISION_MODEL in .env if you ever want a dedicated
+# vision model (e.g. llava, minicpm-v, etc.).
+_VISION_MODEL = os.getenv("VISION_MODEL", None)  # resolved below after _BRAIN_MODEL is set
+
 # How long ollama keeps a model loaded in VRAM after the last request.
 # Ollama default is 5 minutes — far too short for a chat bot that may go quiet
 # for stretches. Set to "1h", "2h", or -1 to keep loaded indefinitely.
@@ -224,6 +229,41 @@ class OllamaInterface:
             logger.error("Error occured when warming %s: %s", 
                          model_name, e)
             return False
+
+    # ------------------------------------------------------------------
+    # Vision — describe image attachments
+    # ------------------------------------------------------------------
+
+    async def ask_vision(self, image_bytes: bytes) -> Optional[str]:
+        """Generate a plain factual description of an image.
+
+        Uses VISION_MODEL (defaults to BRAIN_MODEL if not set in .env).
+        System prompt is deliberately sterile — no Sandy personality leaks
+        into descriptions. This is raw context, not Sandy's voice.
+
+        image_bytes — raw bytes of the image (JPEG, PNG, GIF, WebP).
+
+        Returns the description string, or None on error.
+        """
+        prompt = SandyPrompt.vision_prompt()
+        # Resolve at call time in case _BRAIN_MODEL was overridden via env.
+        model = _VISION_MODEL or _BRAIN_MODEL
+        try:
+            async with self._lock:
+                response = await self._client.chat(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": prompt.system},
+                        {"role": "user",   "content": prompt.user, "images": [image_bytes]},
+                    ],
+                    keep_alive=_KEEP_ALIVE,
+                )
+            desc = (response.message.content or "").strip()
+            logger.debug("Vision → %d chars", len(desc))
+            return desc or None
+        except Exception as exc:
+            logger.error("Vision error: %s", exc)
+            return None
 
     # ------------------------------------------------------------------
     # Bouncer — should Sandy respond?

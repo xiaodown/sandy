@@ -76,7 +76,7 @@ class MemoryClient:
     # Public interface
     # ------------------------------------------------------------------
 
-    async def process_and_store(self, message: discord.Message) -> None:
+    async def process_and_store(self, message: discord.Message, image_descriptions: Optional[list[str]] = None) -> None:
         """Tag, optionally summarise, then persist one message.
 
         Intended to be run as a fire-and-forget background task after the
@@ -88,27 +88,48 @@ class MemoryClient:
         serialise correctly if two messages are processed concurrently.
         Both calls are optional — if either fails or llm is not set, the
         message is still stored without tags or a summary.
+
+        image_descriptions — if the message had image attachments, pass the
+        list of description strings here.  The descriptions are appended to
+        the stored content so Recall and RAG embed the image context rather
+        than empty string.  The real message object is still used for all
+        metadata (author, channel, guild, id).
         """
         tags: list[str] = []
         summary: Optional[str] = None
 
-        if self._llm is not None and message.content:
-            tags = await self._llm.ask_tagger(message.content)
+        # Build the content string we'll actually store and embed.
+        # For image messages: append description(s) so Recall and RAG contain
+        # the image context rather than an empty or text-only string.
+        # We never store raw image bytes — descriptions are the memory.
+        content_for_storage = message.content or ""
+        if image_descriptions:
+            img_block = "  ".join(
+                f"[Image {i}: {d}]" if len(image_descriptions) > 1 else f"[Image: {d}]"
+                for i, d in enumerate(image_descriptions, 1)
+            )
+            content_for_storage = (
+                f"{content_for_storage}  {img_block}".strip()
+                if content_for_storage else img_block
+            )
+
+        if self._llm is not None and content_for_storage:
+            tags = await self._llm.ask_tagger(content_for_storage)
             # Strip leading hyphen or emdash from each tag
             tags = [t.lstrip("-—") for t in tags]
 
-            if len(message.content) > self.SUMMARIZE_THRESHOLD:
-                summary = await self._llm.ask_summarizer(message.content)
+            if len(content_for_storage) > self.SUMMARIZE_THRESHOLD:
+                summary = await self._llm.ask_summarizer(content_for_storage)
 
-        stored = await self._post(message, tags=tags or None, summary=summary)
+        stored = await self._post(message, tags=tags or None, summary=summary, content_override=content_for_storage or None)
 
         # Embed and store in the vector memory for semantic RAG retrieval.
         # message.id is always a real Discord snowflake here — process_and_store
         # is only ever called with genuine discord.Message objects.
-        if self._vector_memory is not None and message.content:
+        if self._vector_memory is not None and content_for_storage:
             await self._vector_memory.add_message(
                 message_id  = str(message.id),
-                content     = message.content,
+                content     = content_for_storage,
                 author_name = message.author.display_name,
                 server_id   = message.guild.id,
                 timestamp   = message.created_at,
@@ -230,8 +251,14 @@ class MemoryClient:
         message: discord.Message,
         tags: Optional[list[str]],
         summary: Optional[str],
+        content_override: Optional[str] = None,
     ) -> bool:
-        """Build the payload and POST to /messages/. Returns True on 200/201."""
+        """Build the payload and POST to /messages/. Returns True on 200/201.
+
+        content_override — when set, stored as the message content instead of
+        message.content.  Used for image messages where we want the description,
+        not an empty string, in Recall.
+        """
         payload = {
             "author_id":    message.author.id,
             "author_name":  message.author.display_name,
@@ -239,7 +266,7 @@ class MemoryClient:
             "channel_name": message.channel.name,
             "server_id":    message.guild.id,
             "server_name":  message.guild.name,
-            "content":      message.content or "(no text content)",
+            "content":      content_override or message.content or "(no text content)",
             "timestamp":    message.created_at.isoformat(),
         }
         if tags is not None:
