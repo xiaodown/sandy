@@ -48,10 +48,6 @@ _PACIFIC = ZoneInfo("America/Los_Angeles")
 # Uses the same SQLite db as the bot; reads are cheap and always up-to-date.
 _registry = Registry()
 
-# Maximum number of tool-call rounds per brain invocation.
-# Prevents runaway loops if the model keeps calling tools.
-MAX_TOOL_ROUNDS = 5
-
 
 # ---------------------------------------------------------------------------
 # Internal Recall HTTP helper
