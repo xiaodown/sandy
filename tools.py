@@ -379,9 +379,14 @@ _SERVER_SCOPED_TOOLS: frozenset[str] = frozenset({
     "search_memories",
 })
 
+# Public set of valid tool names — used by discord_handler to guard against
+# the bouncer hallucinating a non-existent tool name.  Derived from _HANDLERS
+# so it stays in sync automatically whenever a new tool is registered.
+KNOWN_TOOLS: frozenset[str] = frozenset(_HANDLERS)
+
 
 # ---------------------------------------------------------------------------
-# Dispatcher — called by ask_brain for each tool call the model requests
+# Dispatcher — called by discord_handler after bouncer selects a tool
 # ---------------------------------------------------------------------------
 
 async def dispatch(

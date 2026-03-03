@@ -271,15 +271,21 @@ async def on_message(message: discord.Message):
             # --- Tool call (if bouncer recommended one) ----------------
             tool_context = None
             if bouncer_result.use_tool and bouncer_result.recommended_tool:
-                tool_result = await tools.dispatch(
-                    bouncer_result.recommended_tool,
-                    bouncer_result.tool_parameters or {},
-                    server_id=message.guild.id,
-                    server_name=message.guild.name,
-                )
-                tool_context = _format_tool_context(
-                    bouncer_result.recommended_tool, tool_result,
-                )
+                if bouncer_result.recommended_tool not in tools.KNOWN_TOOLS:
+                    logger.warning(
+                        "Bouncer recommended unknown tool %r — ignoring",
+                        bouncer_result.recommended_tool,
+                    )
+                else:
+                    tool_result = await tools.dispatch(
+                        bouncer_result.recommended_tool,
+                        bouncer_result.tool_parameters or {},
+                        server_id=message.guild.id,
+                        server_name=message.guild.name,
+                    )
+                    tool_context = _format_tool_context(
+                        bouncer_result.recommended_tool, tool_result,
+                    )
 
             # --- RAG query ---------------------------------------------
             ollama_history = history.to_ollama_messages(bot.user.id)
