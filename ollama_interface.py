@@ -4,11 +4,12 @@ Interface to a local ollama server.
 Wraps the four LLM roles Sandy uses:
 
     Brain      — main personality model; responds to users in Discord
-    Bouncer    — small model; given last10 context, decides if Sandy should respond
+    Bouncer    — decision engine; decides if Sandy should respond and
+                 recommends tool calls when additional context would help
     Tagger     — small model; generates 1-3 recall tags for a message
     Summarizer — small model; optionally summarises long messages before recall
 
-All four roles currently use mistral-small to avoid VRAM thrashing.
+All four roles currently use the same model to avoid VRAM thrashing.
 Model names are read from the root .env:
     BRAIN_MODEL       (default: mistral-small)
     BOUNCER_MODEL     (default: mistral-small)
@@ -20,25 +21,21 @@ Structured outputs (bouncer / tagger / summarizer) use ollama's format= paramete
 with a Pydantic schema, which is far more reliable than asking the model to emit
 valid JSON by itself.
 
-Known Mistral quirks:
-  - Chat template only injects [AVAILABLE_TOOLS] when a user message is in the
-    last 2 positions. The deferral nudge loop always appends a trailing user
-    message to keep tool schemas visible.
-  - Model occasionally emits tool calls as plain text instead of via the API.
-    _looks_like_failed_tool_call() catches this and triggers a nudge.
+The brain model does NOT do tool calling — tool selection is handled by the
+bouncer, and the caller (discord_handler) executes the tool and injects results
+into the brain's context before asking it to respond.
 """
 
 import asyncio
 import logging
 import os
-from typing import Callable, Optional
+from typing import Any, Optional
 
 import ollama
 from pydantic import BaseModel, field_validator
 from dotenv import load_dotenv
 
 from prompt import SandyPrompt
-import tools as _tools
 
 load_dotenv()
 
@@ -78,22 +75,30 @@ _VISION_MODEL = os.getenv("VISION_MODEL", None)  # resolved below after _BRAIN_M
 # reloading weights across the bus adds noticeable latency.
 _KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "1h")
 
+# Bouncer, tagger, and summarizer use low temperatures for consistent
+# structured output.  The brain temperature is intentionally higher for
+# personality — don't conflate the two.
+_BOUNCER_TEMPERATURE    = float(os.getenv("BOUNCER_TEMPERATURE", "0.1"))
+_TAGGER_TEMPERATURE     = float(os.getenv("TAGGER_TEMPERATURE", "0.1"))
+_SUMMARIZER_TEMPERATURE = float(os.getenv("SUMMARIZER_TEMPERATURE", "0.1"))
+
 
 # ---------------------------------------------------------------------------
 # Structured output schemas (Pydantic → JSON Schema → ollama format=)
 # ---------------------------------------------------------------------------
 
 class BouncerResponse(BaseModel):
-    """Structured output for the Bouncer role."""
-    should_respond: bool
-    reason: str  # brief explanation — useful for debugging / logging
+    """Structured output for the Bouncer role.
 
-# ToolCallerResponse is kept for reference; used by the commented-out
-# ask_tool_intent() LLM classifier below. Re-enable if phrase matching
-# proves insufficient.
-# class ToolCallerResponse(BaseModel):
-#     """Structured output for the tool caller role."""
-#     tool_call_intended: bool
+    Also includes tool recommendation: which tool (if any) to call before
+    the brain generates a response.  Tool fields are ignored when
+    should_respond is False.
+    """
+    should_respond: bool
+    reason: str
+    use_tool: bool = False
+    recommended_tool: Optional[str] = None
+    tool_parameters: Optional[dict[str, Any]] = None
 
 class TaggerResponse(BaseModel):
     """Structured output for the Tagger role."""
@@ -110,61 +115,6 @@ class TaggerResponse(BaseModel):
 class SummarizerResponse(BaseModel):
     """Structured output for the Summarizer role."""
     summary: str
-
-
-# ---------------------------------------------------------------------------
-# Deferral phrase detection — replaces the LLM-based ask_tool_intent classifier.
-# If the brain's round-0 text contains one of these phrases, we treat it as a
-# failed tool-call attempt and inject a forcing nudge.
-# ---------------------------------------------------------------------------
-
-_DEFERRAL_PHRASES: tuple[str, ...] = (
-    # service-framing (old model, kept for safety)
-    "let me look", "let me check", "let me take a look",
-    "let me search", "let me see", "let me pull up",
-    "let me go back", "let me dig", "let me find",
-    "i'll look", "i'll check", "i'll take a look",
-    "i'll search", "i'll pull up", "i'll go back",
-    "i'll find", "i'll dig",
-    "lemme look", "lemme check", "lemme see",
-    "let's see if", "let's find",
-    "gonna check", "gonna look",
-    # memory/introspection framing (prompted style)
-    "hang on", "give me a sec", "give me a moment",
-    "trying to think", "trying to remember", "trying to recall",
-    "i'm thinking", "let me think",
-    "wait, wasn't", "wait, didn't", "wasn't there something",
-    "i think i remember", "i vaguely remember", "let me try and remember",
-    "let me try to remember", "i'm trying to remember",
-    "check my", "check the log", "check back",
-)
-
-
-def _looks_like_deferral(text: str) -> bool:
-    """Return True if text contains a phrase suggesting the model intended to
-    call a tool but produced conversational filler instead.
-
-    Case-insensitive substring match — fast, no LLM call needed.
-    """
-    lower = text.lower()
-    return any(phrase in lower for phrase in _DEFERRAL_PHRASES)
-
-
-# Tool names extracted from the schema so this stays in sync automatically.
-_TOOL_NAMES: frozenset[str] = frozenset(
-    s["function"]["name"] for s in _tools.TOOL_SCHEMAS
-)
-
-
-def _looks_like_failed_tool_call(text: str) -> bool:
-    """Return True if text mentions a tool name without an actual tool call.
-
-    This catches the failure mode where the model knows it should call a tool
-    and even picks the right one, but emits it as plain text (e.g. '[Sandy]
-    recall_recent 10 minutes') instead of via the function-calling API.
-    """
-    lower = text.lower()
-    return any(name in lower for name in _TOOL_NAMES)
 
 
 # ---------------------------------------------------------------------------
@@ -189,11 +139,11 @@ class OllamaInterface:
 
     def __init__(self) -> None:
         self._client = ollama.AsyncClient()
-        # Single lock serialises all ollama calls.
-        # High-priority callers (bouncer, brain) always wait for it.
-        # Low-priority callers (tagger, summarizer) check locked() first and
-        # skip immediately if it is held — they lose their tags/summary for
-        # that message but never delay a response.
+        # Single lock serialises all ollama calls so only one model
+        # inference runs at a time.  All callers (bouncer, brain, tagger,
+        # summarizer, vision) acquire and wait.  In practice tagger and
+        # summarizer run after the reply is sent, so they queue behind
+        # the brain without delaying the user.
         self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
@@ -269,15 +219,15 @@ class OllamaInterface:
     # Bouncer — should Sandy respond?
     # ------------------------------------------------------------------
 
-    async def ask_bouncer(self, context: str, bot_name: str = "Sandy") -> bool:
-        """Ask the bouncer whether Sandy should respond given channel context.
+    async def ask_bouncer(self, context: str, bot_name: str = "Sandy") -> BouncerResponse:
+        """Decide whether Sandy should respond, and optionally which tool to use.
 
         context  — a formatted ChannelHistory string (from history.format()).
         bot_name — the bot's Discord display name, forwarded to the prompt so
                    the bouncer can recognise Sandy's prior lines in the history.
 
-        Returns True if Sandy should respond, False otherwise.
-        On any error, returns False (fail closed — don't respond if unsure).
+        Returns a BouncerResponse with respond/tool decisions.
+        On any error, returns a no-respond response (fail closed).
         """
         prompt = SandyPrompt.bouncer_prompt(context, bot_name=bot_name)
         try:
@@ -290,6 +240,7 @@ class OllamaInterface:
                     ],
                     format=BouncerResponse.model_json_schema(),
                     keep_alive=_KEEP_ALIVE,
+                    options={"temperature": _BOUNCER_TEMPERATURE},
                 )
             result = BouncerResponse.model_validate_json(response.message.content)
             # If the model voted NO but its reason contains clear YES-signal phrases,
@@ -306,54 +257,29 @@ class OllamaInterface:
                     "Bouncer incoherence: flipping False → True based on reason — %r",
                     result.reason,
                 )
-                result = BouncerResponse(should_respond=True, reason=result.reason)
+                result.should_respond = True
+            # If she's not responding, tool fields are meaningless — zero them.
+            if not result.should_respond:
+                result.use_tool = False
+                result.recommended_tool = None
+                result.tool_parameters = None
             logger.info(
-                "Bouncer → should_respond=%s  reason=%r",
-                result.should_respond, result.reason,
+                "Bouncer → respond=%s  tool=%s(%s)  reason=%r",
+                result.should_respond,
+                result.recommended_tool or "none",
+                "yes" if result.use_tool else "no",
+                result.reason,
             )
-            return result.should_respond
+            return result
         except Exception as exc:
             logger.error("Bouncer error (defaulting to no-respond): %s", exc)
-            return False
+            return BouncerResponse(
+                should_respond=False,
+                reason=f"error: {exc}",
+                use_tool=False,
+            )
 
-    # ------------------------------------------------------------------
-    # Tool Caller — is Sandy indicating that she wants to use a tool?
-    # ------------------------------------------------------------------
-    #
-    # LLM-based classifier kept here for reference. Re-enable by:
-    #   1. Uncommenting ToolCallerResponse above.
-    #   2. Uncommenting this method.
-    #   3. Replacing `_looks_like_deferral(content_lower)` in ask_brain
-    #      with `await self.ask_tool_intent(content_lower)`.
-    #
-    # async def ask_tool_intent(self, context: str) -> bool:
-    #     """Ask the brain model whether a response indicates tool-call intent.
-    #
-    #     context — the text of the brain's round-0 reply.
-    #     Returns True if the model intended a tool call, False otherwise.
-    #     On any error, returns False (fail closed).
-    #     """
-    #     prompt = SandyPrompt.tool_caller_prompt(context)
-    #     try:
-    #         async with self._lock:
-    #             response = await self._client.chat(
-    #                 model=_BRAIN_MODEL,
-    #                 messages=[
-    #                     {"role": "system", "content": prompt.system},
-    #                     {"role": "user",   "content": prompt.user},
-    #                 ],
-    #                 format=ToolCallerResponse.model_json_schema(),
-    #                 keep_alive=_KEEP_ALIVE,
-    #             )
-    #         result = ToolCallerResponse.model_validate_json(response.message.content)
-    #         logger.info(
-    #             "Tool caller intent → tool_call_intended=%s",
-    #             result.tool_call_intended,
-    #         )
-    #         return result.tool_call_intended
-    #     except Exception as exc:
-    #         logger.error("Tool Intent error (defaulting to False): %s", exc)
-    #         return False
+
 
     # ------------------------------------------------------------------
     # Tagger — generate recall tags
@@ -379,6 +305,7 @@ class OllamaInterface:
                     ],
                     format=TaggerResponse.model_json_schema(),
                     keep_alive=_KEEP_ALIVE,
+                    options={"temperature": _TAGGER_TEMPERATURE},
                 )
             result = TaggerResponse.model_validate_json(response.message.content)
             logger.debug("Tagger → tags=%r", result.tags)
@@ -411,6 +338,7 @@ class OllamaInterface:
                     ],
                     format=SummarizerResponse.model_json_schema(),
                     keep_alive=_KEEP_ALIVE,
+                    options={"temperature": _SUMMARIZER_TEMPERATURE},
                 )
             result = SummarizerResponse.model_validate_json(response.message.content)
             logger.debug("Summarizer → summary=%r", result.summary)
@@ -429,30 +357,23 @@ class OllamaInterface:
         bot_name: str = "Sandy",
         server_name: str = "the server",
         channel_name: str = "general",
-        server_id: int = 0,
-        tools: Optional[list] = None,
-        send_fn: Optional[Callable] = None,
         rag_context: Optional[str] = None,
+        tool_context: Optional[str] = None,
     ) -> Optional[str]:
         """Generate a response from the Brain model.
 
         messages     — multi-turn history from ChannelHistory.to_ollama_messages().
-                       The system prompt is prepended and the grounding user turn
-                       is appended automatically.
+                       The system prompt is prepended automatically.
         bot_name     — the bot's Discord display name.
         server_name  — the Discord server (guild) name.
         channel_name — the channel Sandy is responding in.
-        server_id    — the Discord guild ID; injected into all Recall tool calls
-                       so Sandy cannot access another server's message history.
-        tools        — list of ollama tool schema dicts (from tools.TOOL_SCHEMAS).
-        send_fn      — optional async callable (e.g. channel.send) invoked with
-                       the deferral text when Sandy says "let me check" without
-                       calling a tool. Lets the user see Sandy's intent while
-                       the tool call and final reply are still in flight.
         rag_context  — optional pre-formatted block of semantically similar past
                        messages from VectorMemory.query().  Injected into the
-                       system prompt as background awareness before the conversation
-                       history.  Empty string or None → no injection.
+                       system prompt as background awareness.
+        tool_context — optional pre-formatted block of tool results (memory recall,
+                       web search, etc.) retrieved by the bouncer's recommendation.
+                       Injected into the system prompt so Sandy can reference the
+                       information naturally in her response.
 
         Returns the response text, or None on error.
         """
@@ -470,162 +391,28 @@ class OllamaInterface:
         # "completion mode" and echo the entire context back in their reply.
         system_content = f"{prompt.system}\n\n{prompt.user}"
         if rag_context:
-            # Inject semantically similar past messages as ambient background
-            # awareness.  Framed as Sandy's own remembered fragments so she
-            # treats them as first-person memory, not external data.
             system_content += (
                 "\n\n## Fragments from your memory that may be relevant\n"
                 + rag_context
             )
+        if tool_context:
+            system_content += "\n\n" + tool_context
         full_messages = (
             [{"role": "system", "content": system_content}]
             + messages
         )
         try:
-            kwargs: dict = {
-                "model": _BRAIN_MODEL,
-                "messages": full_messages,
-                "keep_alive": _KEEP_ALIVE,
-                "options": {
-                    "temperature": _BRAIN_TEMPERATURE,
-                    "num_predict": _BRAIN_NUM_PREDICT,
-                    "num_ctx":     _BRAIN_NUM_CTX,
-                },
-            }
-            if tools:
-                kwargs["tools"] = tools
-
-            async with self._lock:  # high-priority: always wait
-                try:
-                    response = await self._client.chat(**kwargs)
-                except ollama.ResponseError as exc:
-                    if exc.status_code == 400 and kwargs.get("tools"):
-                        # Model doesn't support native tool calling — retry bare.
-                        # Sandy can still respond; she just won't have memory access
-                        # this turn. Log clearly so we know tools are disabled.
-                        logger.warning(
-                            "Brain: model does not support tools (400) — "
-                            "retrying without tools. Switch BRAIN_MODEL to one "
-                            "that supports tool calling (e.g. llama3.1, qwen2.5)."
-                        )
-                        kwargs.pop("tools")
-                        response = await self._client.chat(**kwargs)
-                    else:
-                        raise
-
-            # Tool call loop.
-            # Each iteration: the model said "call this tool"; we call it,
-            # append the result as a tool message, and re-ask the model.
-            # The lock is released between rounds so the GPU is free while
-            # we await the Recall HTTP call; ollama's KV cache means the
-            # re-call only processes the new tokens, not the whole history.
-            #
-            # Deferral detection: if round 0 produces text-only with no tool
-            # calls but the text looks like "let me check" / "I'll look", the
-            # model intended to use a tool but misfired. If send_fn is set,
-            # the deferral text is sent to Discord immediately so the user sees
-            # Sandy's intent; then a forcing nudge is injected and we loop again.
-            # The final post-tool reply is returned normally and sent by the caller.
-
-            for _round in range(_tools.MAX_TOOL_ROUNDS):
-                if not response.message.tool_calls:
-                    # No tool call this round — check for deferral on any round.
-                    # The model can say "lemme think" after a tool result too,
-                    # e.g. "didn't find it, let me check differently".
-                    if kwargs.get("tools"):
-                        content = response.message.content or ""
-                        content_lower = content.lower()
-                        # Only treat as an incomplete deferral if the response is
-                        # short. A long response that opens with "hmm, let me think"
-                        # and then delivers a full answer (often from RAG context)
-                        # should be treated as a complete reply, not a failed tool
-                        # call. 150 chars accommodates the phrase + a sentence of
-                        # actual answer before we decide it's substantive enough.
-                        is_deferral     = _looks_like_deferral(content_lower) and len(content) < 150
-                        is_failed_call  = _looks_like_failed_tool_call(content_lower)
-                        if is_deferral or is_failed_call:
-                            reason = (
-                                "expressed tool call as plain text"
-                                if is_failed_call
-                                else "used deferral phrase"
-                            )
-                            logger.info(
-                                "Brain %s without calling a tool (round %d) — injecting forcing nudge",
-                                reason, _round,
-                            )
-                            # Only send the deferral text to Discord on the first
-                            # round, and only when it's a human-readable deferral
-                            # phrase — not when it's a raw JSON tool call blob,
-                            # which is ugly and confusing to users.
-                            if _round == 0 and send_fn and content and is_deferral and not is_failed_call:
-                                await send_fn(response.message.content)
-                            # Keep the deferral in context so the model doesn't
-                            # contradict itself, then nudge via system so Sandy
-                            # doesn't interpret it as a user command to sass back.
-                            # Escalate nudge strength on subsequent rounds.
-                            if _round == 0:
-                                nudge = (
-                                    "You indicated you wanted to use a tool. "
-                                    "Call the appropriate tool now — do not respond with text yet."
-                                )
-                            else:
-                                nudge = (
-                                    "You must use your function-calling capability. "
-                                    "Do NOT generate a text response. "
-                                    "Invoke one of your available tools right now. "
-                                    "A text reply without a preceding tool call is not acceptable."
-                                )
-                            full_messages.append(response.message)
-                            full_messages.append({
-                                "role": "system",
-                                "content": nudge,
-                            })
-                            # Mistral's chat template only injects [AVAILABLE_TOOLS]
-                            # into the last 2 user-role messages. Once we append the
-                            # assistant deferral + system nudge above, the original
-                            # user message is no longer near the end and the model
-                            # stops seeing its tool schemas. Fix: always end with a
-                            # user message so the template injects tools again.
-                            full_messages.append({
-                                "role": "user",
-                                "content": "Use one of your tools now — don't respond until you've checked.",
-                            })
-                            kwargs["messages"] = full_messages
-                            async with self._lock:
-                                response = await self._client.chat(**kwargs)
-                            continue  # re-evaluate at top of loop
-                    break
-
-                names = [tc.function.name for tc in response.message.tool_calls]
-                logger.info("Brain tool calls (round %d): %s", _round + 1, names)
-
-                # Append the assistant turn that contains the tool call(s).
-                # ollama accepts Message objects alongside plain dicts.
-                full_messages.append(response.message)
-
-                # Execute each tool and append its result.
-                for tc in response.message.tool_calls:
-                    result = await _tools.dispatch(
-                        tc.function.name,
-                        dict(tc.function.arguments),
-                        server_id=server_id,
-                        server_name=server_name,
-                    )
-                    full_messages.append({"role": "tool", "content": result})
-
-                # Re-ask the model with tool results appended.
-                kwargs["messages"] = full_messages
-                async with self._lock:
-                    response = await self._client.chat(**kwargs)
-            else:
-                # for/else: loop exhausted without break — model kept calling
-                # tools for MAX_TOOL_ROUNDS straight, which is pathological.
-                logger.warning(
-                    "Brain hit MAX_TOOL_ROUNDS (%d) without a final answer — "
-                    "returning whatever content exists",
-                    _tools.MAX_TOOL_ROUNDS,
+            async with self._lock:
+                response = await self._client.chat(
+                    model=_BRAIN_MODEL,
+                    messages=full_messages,
+                    keep_alive=_KEEP_ALIVE,
+                    options={
+                        "temperature": _BRAIN_TEMPERATURE,
+                        "num_predict": _BRAIN_NUM_PREDICT,
+                        "num_ctx":     _BRAIN_NUM_CTX,
+                    },
                 )
-
             return response.message.content
         except Exception as exc:
             logger.error("Brain error: %s", exc)

@@ -70,6 +70,30 @@ _VISION_CONTENT_TYPES: frozenset[str] = frozenset({
 # Skip files over this size — avoids downloading huge uploads on slow connections.
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20 MB
 
+# ---------------------------------------------------------------------------
+# Tool result framing for brain injection
+# ---------------------------------------------------------------------------
+
+_MEMORY_TOOLS: frozenset[str] = frozenset({
+    "recall_recent", "recall_from_user", "recall_by_topic", "search_memories",
+})
+
+
+def _format_tool_context(tool_name: str, result: str) -> str:
+    """Frame a tool result for injection into the brain's system prompt.
+
+    The framing varies by tool type so Sandy talks about remembering vs.
+    looking something up, matching natural personality.
+    """
+    if tool_name == "search_web":
+        return f"## You just looked this up online\n{result}"
+    elif tool_name == "get_current_time":
+        return f"## You just checked the time\n{result}"
+    elif tool_name in _MEMORY_TOOLS:
+        return f"## You just recalled this from memory\n{result}"
+    else:
+        return f"## Additional context\n{result}"
+
 
 async def _describe_attachments(message: discord.Message) -> list[str]:
     """Download and describe all image attachments in a Discord message.
@@ -235,39 +259,43 @@ async def on_message(message: discord.Message):
         cache.add(message)
         rag_query_text = message.content
 
-    # --- Bouncer / Brain pipeline (awaited) ----------------------------
-    # Ask the bouncer if Sandy should respond, given the recent context.
-    # If yes, call the brain for a reply and send it.
-    # Both calls hold the shared OllamaInterface lock, so they take priority
-    # over the background tagging/summarization that fires afterward.
+    # --- Bouncer decision (respond + tool) ----------------------------
     history = cache.get(message.guild.id, message.channel.id)
+    bouncer_result = await llm.ask_bouncer(history.format(), bot_name=bot.user.display_name)
 
-    # Call the bouncer to determine if it makes logical sense for Sandy to respond, given
-    # the last10 context.
-    should_respond = await llm.ask_bouncer(history.format(), bot_name=bot.user.display_name)
-
-    if should_respond:
-        # Show "Sandy is typing..." for the entire duration of LLM generation.
-        # channel.typing() is an async context manager that sends the indicator
-        # and refreshes it every 5 seconds automatically until the block exits.
+    if bouncer_result.should_respond:
+        # Show "Sandy is typing..." for the entire duration of tool call +
+        # LLM generation.  channel.typing() is an async context manager that
+        # sends the indicator and refreshes it every 5 seconds automatically.
         async with message.channel.typing():
+            # --- Tool call (if bouncer recommended one) ----------------
+            tool_context = None
+            if bouncer_result.use_tool and bouncer_result.recommended_tool:
+                tool_result = await tools.dispatch(
+                    bouncer_result.recommended_tool,
+                    bouncer_result.tool_parameters or {},
+                    server_id=message.guild.id,
+                    server_name=message.guild.name,
+                )
+                tool_context = _format_tool_context(
+                    bouncer_result.recommended_tool, tool_result,
+                )
+
+            # --- RAG query ---------------------------------------------
             ollama_history = history.to_ollama_messages(bot.user.id)
-            # Query the vector store for semantically similar past messages.
-            # This happens before the brain call so results can be injected
-            # into the system prompt as ambient background memory.
             rag_context = await vector_memory.query(
                 rag_query_text,
                 server_id=message.guild.id,
             )
+
+            # --- Brain response ----------------------------------------
             reply = await llm.ask_brain(
                 ollama_history,
                 bot_name=bot.user.display_name,
                 server_name=message.guild.name,
                 channel_name=message.channel.name,
-                server_id=message.guild.id,
-                tools=tools.TOOL_SCHEMAS,
-                send_fn=message.channel.send,
                 rag_context=rag_context,
+                tool_context=tool_context,
             )
 
             if reply:

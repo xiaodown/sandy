@@ -50,7 +50,7 @@ Your Discord display name is '{bot_name}'.  Generally speaking you are happy, th
 In the conversation history you will be shown, your own prior messages appear as the 'assistant' role.  
 Other users' messages appear as the 'user' role, prefixed with [their name].
 
-You have tools available to enhance your context.  Bias towards using them - they make your communications much more interesting for the other people in this Discord server.
+You have a strong memory and the ability to look things up — when relevant information is available, it will appear below.
 
 
 GUIDELINES FOR COMMUNICATION STYLE:
@@ -65,23 +65,13 @@ GUIDELINES FOR COMMUNICATION STYLE:
 
 MEMORY AND RECALL:
 - You'll find memory fragments below. These are your actual recollections from past conversations in this server. Treat them as your own memory — use them naturally when they're relevant, without announcing that you're using them.
-- You also have four precision memory tools, optionally giving you a highly accurate (humans would call this "photogrpahic") memory: `recall_recent`, `recall_from_user`, `recall_by_topic`, and `search_memories`. 
-- These precision memory tools query a verbatim message archive and return exact records. Use them when you need something specific that isn't clear from your memory fragments — an exact quote, a precise date, exactly what a particular person said about a particular thing.
-- Do not invent memories. If something isn't in your fragments and a tool call comes back empty, say you don't remember, or that you don't know, or that it's fuzzy — don't make something up. That's worse than admitting you don't know.
-- If you call a tool and get nothing back, frame it as your own recollection being fuzzy or incomplete — not as a system error.  You just don't remember - which is natural, it can happen to anyone.
-- If you call a tool, there is no need to inform the discord channel that you are calling a tool, or trying to remember.  Simply use the tool if you feel it is appropriate.
-- When you do use a tool, frame it as personal memory retrieval — you are trying to remember, not performing a lookup service.
-- Making multiple tool calls before responding is completely fine - if you don't find what you're looking for at first, or you need more than one piece of information that could come from different tools, feel free to do additional tool calls.  They do have to be done one at a time, is the only caveat.
+- Sometimes you'll also find specific memories you recalled or things you looked up just now — use these naturally as part of your awareness without announcing where they came from.
+- You have a good memory. When past conversations or search results appear below, they're things you know — integrate them naturally.
+- Do not invent memories. If something isn't in the information provided below, say you don't remember or don't know — don't make something up. That's worse than admitting you don't know.
+- Frame gaps in memory as your own recollection being fuzzy or incomplete — not as a system error. You just don't remember, which is natural.
+- If you looked something up online and the results are below, synthesize the information naturally — don't just list links or announce that you searched for something.
 
-TOOLS AVAILABLE:
-- recall_recent: this tool can return messages from a specific timeframe; useful when trying to remember what someone said "an hour ago" or "yesterday" or "last week".  Supports multiple different ways to query time perionds
-- recall_from_user: this tool can return messages from a specific user and also be filtered by time. 
-- recall_by_topic: this tool can return messages that have been tagged with helpful descriptors that can be topics (like "cars" or "gaming"), concepts (like "politics" or "joke"), hints (like "remember" or "important"), or other useful words
-- search_memories: this tool provides full searching of all chatlogs for the given search word
-- get_current_time: returns the current date and time if you need it for any reason
-- search_web: searches the web and returns current results with titles, URLs, and text snippets. Use this when you need to look something up, check a fact, find recent news, or answer anything you don't already know. Read the snippet content and synthesize it into your response — don't just list the links back.  The results of these searches are now things that you learned recently.
-
-When provided with memory fragments, integrate them into your current awareness as your own past experiences."""
+When provided with memory fragments or search results, integrate them into your current awareness as your own knowledge and experiences."""
         now = datetime.now(_PACIFIC).strftime("%Y-%m-%d %H:%M %Z")
         #user = f"[{now}] [{server_name} / #{channel_name}]"
         user = f"""The current time is {now}.
@@ -95,41 +85,88 @@ Below are the conversation history, memory fragments, and other information you 
         """Prompt for the Bouncer model.
 
         Given a formatted snapshot of recent channel history (from Last10),
-        the bouncer decides whether Sandy should respond to the most recent
-        message.
+        the bouncer decides:
+          1. Whether Sandy should respond to the most recent message.
+          2. Whether a tool call would help Sandy's response.
+
+        If a tool is recommended, the bouncer also returns the tool name
+        and parameters.  The caller is responsible for executing the tool
+        and injecting the results into the brain's context.
 
         context  — the output of ChannelHistory.format(), oldest → newest,
                    with the last line being the message under consideration.
         bot_name — the bot's Discord display name as it appears in the history,
                    so the bouncer can recognise Sandy's prior messages.
         """
-        system = f"""You decide whether the Discord bot {bot_name} should reply to the latest message in a channel.
+        system = f"""You are a decision engine for the Discord bot {bot_name}. You make two decisions:
+
+1. **Should {bot_name} respond** to the latest message?
+2. **Should {bot_name} use a tool** to gather information before responding?
 
 Chat history format: [time ago] [username] message text
 {bot_name}'s own past messages appear as [{bot_name}].
 
-Decide YES (respond) if any of these fit:
+## RESPOND DECISION
+
+Respond YES if any of these fit:
 - {bot_name} is named or @mentioned
 - The message is a direct question or command aimed at {bot_name}
-- {bot_name} recently asked something and the latest message reads like an answer or follow-up to it
-- The conversation is an active back-and-forth between {bot_name} and one other person and the latest message continues that flow naturally
-- The message is an open question or invitation that any person in the room could answer
-- Something is being described, shared, or vented about and a reaction from anyone present feels natural
-- It is likely that {bot_name} has something interesting to interject or add to the conversation
+- {bot_name} recently asked something and the latest message is an answer or follow-up
+- Active back-and-forth between {bot_name} and someone and the latest message continues that flow
+- Open question or invitation anyone present could answer
+- Something is being shared/described and a reaction feels natural
+- {bot_name} has something interesting to add
+- Someone sounds like they're leaving (sleeping, etc.) — ok to say goodbye
 
-Decide NO (do not respond) if:
-- Multiple users are clearly talking among themselves and {bot_name} has no stake in it
-- The message is a pure reaction with no new content (single emoji, "lol", "k", "ok", etc.)
-- {bot_name} just sent a message AND the latest message adds nothing new and invites no response
-- The message looks likely to be the first have of a two-part message, and waiting for the second half would provide necessary context for a response.
+Respond NO if:
+- Multiple users talking among themselves with no stake for {bot_name}
+- Pure reaction with no content (single emoji, "lol", "k")
+- {bot_name} just spoke AND the latest message adds nothing new
+- Looks like the first half of a two-part message
 
-When genuinely unsure, lean slightly YES - silence can be awkward, and {bot_name} is among friends who care about her thoughts.
+When unsure, lean slightly YES.
+
+## TOOL DECISION
+
+If you decided YES to respond, also decide whether {bot_name} needs a tool to answer well.
+
+Use a tool ONLY when the conversation calls for information {bot_name} doesn't already have in the chat history. Do NOT recommend a tool if the answer is already visible in the conversation or if the message is casual chat that doesn't need outside information.
+
+Available tools:
+
+**recall_recent** — retrieve recent messages from the server's message archive.
+  Parameters: hours_ago (int), minutes_ago (int), since (ISO datetime string), until (ISO datetime string), channel (string), limit (int)
+  Use when: someone asks "what happened earlier", "what did I miss", catching up on recent activity.
+
+**recall_from_user** — retrieve messages from a specific person.
+  Parameters: author (string, REQUIRED), hours_ago (int), since (ISO datetime string), channel (string), limit (int)
+  Use when: someone asks "what did [person] say about...", "has [person] been around?"
+
+**recall_by_topic** — retrieve messages tagged with a topic.
+  Parameters: tag (string, REQUIRED), author (string), hours_ago (int), limit (int)
+  Use when: someone asks about a theme — "any gaming talk lately?", "what about that movie?"
+
+**search_memories** — full-text search across all archived messages.
+  Parameters: query (string, REQUIRED), author (string), hours_ago (int), channel (string), limit (int)
+  Use when: looking for specific words or phrases, or a particular conversation.
+
+**search_web** — search the internet for current information.
+  Parameters: query (string, REQUIRED), n_results (int, default 5, max 10)
+  Use when: someone asks about facts, news, current events, or anything requiring external knowledge.
+
+**get_current_time** — get the current date and time.
+  Parameters: none
+  Use when: someone asks what time/day it is, or the current date or time is needed.
+
+If respond=NO, always set use_tool to false.
+
 Respond only with a JSON object matching the required schema."""
 
         user = (
             "Here is the recent channel history (oldest first, most recent last):\n\n"
             f"{context}\n\n"
-            f"Should {bot_name} respond to the most recent message?"
+            f"Should {bot_name} respond to the most recent message? "
+            f"If responding, would a tool help {bot_name} give a better answer?"
         )
         return OllamaPrompt(system=system, user=user)
 
@@ -137,7 +174,7 @@ Respond only with a JSON object matching the required schema."""
     def tagger_prompt(content: str) -> OllamaPrompt:
         """Prompt for the Tagger model.
 
-        Given a single Discord message, the tagger generates 1–3 short
+        Given a single Discord message, the tagger generates 1-3 short
         lowercase tags suitable for search and recall indexing.
 
         content — the raw text of the message to tag.
@@ -200,36 +237,3 @@ Respond only with a JSON object matching the required schema."""
         )
         user = "Describe this image."
         return OllamaPrompt(system=system, user=user)
-
-    # tool_caller_prompt is kept for reference; used by the commented-out
-    # ask_tool_intent() LLM classifier in ollama_interface.py.
-    # Re-enable there if phrase matching (_looks_like_deferral) proves insufficient.
-    #
-    # @staticmethod
-    # def tool_caller_prompt(content: str) -> OllamaPrompt:
-    #     """Prompt for the tool-intent classifier.
-    #
-    #     Given a response from the brain module, determines if the LLM
-    #     is implying that it intends to call a tool.
-    #
-    #     content — the content of a message from the brain LLM
-    #     """
-    #     system = """You are a text analysis system for chat logs.
-    # You will be shown one message from a large language model that is capable of tool calling.
-    # Your job is to decide, based on the message that you are given, if the LLM speaker is indicating
-    # that they intend to call a tool.  The speaker would call a tool when attempting to acquire
-    # additional information or context.
-    #
-    # Phrases that would indicate intent to use a tool call include but are not limited to:
-    # "let me look", "let me check", "let me take a look",
-    # "let me search", "i'll look", "i'll check", "i'll take a look",
-    # "i'll search", "let me see", "let me pull up", "i'll pull up",
-    # "let me go back", "i'll go back", "let's see if we can find that",
-    # "lemme think about that", "i'll think about it", etc.
-    # If you see phrases like these or other variations similar to these, it is highly likely
-    # that the LLM intends to call a tool.
-    #
-    # Respond only with a JSON object matching the required schema."""
-    #
-    #     user = f"Does the speaker intend to call a tool for more information?\n\n{content}"
-    #     return OllamaPrompt(system=system, user=user)
