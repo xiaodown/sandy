@@ -1,5 +1,5 @@
 """
-Sandy's callable tools for the Brain model.
+Sandy's callable tools for the bouncer/brain pipeline.
 
 This module is the single place where tools are defined and dispatched.
 Adding a new tool:
@@ -16,26 +16,37 @@ data. dispatch() forcibly injects the current server's IDs before calling the
 handler, regardless of what the model provided.
 """
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import httpx
 from dotenv import load_dotenv
 
+from recall import ChatDatabase
 from registry import Registry
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-_RECALL_BASE = (
-    f"http://{os.getenv('RECALL_HOST', '127.0.0.1')}"
-    f":{os.getenv('RECALL_PORT', '8000')}"
-)
+# Recall database — initialised by init_recall_db() at bot startup.
+# tools.py doesn't own the db lifecycle; discord_handler creates it and
+# passes it here via init_recall_db().
+_recall_db: ChatDatabase | None = None
+
+
+def init_recall_db(db: ChatDatabase) -> None:
+    """Set the shared Recall database instance for tool handlers.
+
+    Called once from discord_handler at startup, after the database has
+    been initialised.
+    """
+    global _recall_db
+    _recall_db = db
 
 _SEARXNG_BASE = (
     f"http://{os.getenv('SEARXNG_HOST', '127.0.0.1')}"
@@ -50,30 +61,28 @@ _registry = Registry()
 
 
 # ---------------------------------------------------------------------------
-# Internal Recall HTTP helper
+# Internal Recall query helper
 # ---------------------------------------------------------------------------
 
-async def _recall_get(path: str, params: dict[str, Any]) -> list[dict] | None:
-    """GET from the Recall API. Returns parsed JSON list or None on error.
+async def _recall_query(**kwargs: Any) -> list | None:
+    """Query Recall via direct DB call. Returns list of ChatMessageResponse or None on error.
 
-    None values are dropped so the API treats missing params as "no filter".
+    Runs the synchronous sqlite3 call in a thread to avoid blocking the
+    event loop.  None values are dropped so missing params act as "no filter".
     """
-    clean = {k: v for k, v in params.items() if v is not None}
-    url = f"{_RECALL_BASE}{path}"
-    if clean:
-        url += "?" + urlencode(clean)
+    if _recall_db is None:
+        logger.error("Recall DB not initialised — call init_recall_db() first")
+        return None
+    clean = {k: v for k, v in kwargs.items() if v is not None}
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(url, headers={"Accept": "application/json"})
-            r.raise_for_status()
-            return r.json()
+        return await asyncio.to_thread(_recall_db.get_messages, **clean)
     except Exception as exc:
-        logger.error("Recall API error (%s): %s", url, exc)
+        logger.error("Recall query error: %s", exc)
         return None
 
 
-def _format_messages(data: list[dict]) -> str:
-    """Format a Recall message list into a readable block for the model.
+def _format_messages(data: list) -> str:
+    """Format a list of ChatMessageResponse objects into a readable block for the model.
 
     Author display names are resolved via the registry so Sandy sees current
     nicknames rather than whatever name was stored at the time the message was
@@ -83,17 +92,17 @@ def _format_messages(data: list[dict]) -> str:
     lines = []
     for msg in data:
         try:
-            dt = datetime.fromisoformat(msg["timestamp"].replace("Z", "+00:00"))
+            dt = msg.timestamp
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             ts = dt.astimezone(_PACIFIC).strftime("%Y-%m-%d %H:%M %Z")
         except Exception:
-            ts = msg.get("timestamp", "?")
+            ts = "?"
 
         # Prefer current nickname from registry; fall back to archived name.
-        author_id  = msg.get("author_id")
-        server_id  = msg.get("server_id")
-        stored_name = msg.get("author_name", "?")
+        author_id   = msg.author_id
+        server_id   = msg.server_id
+        stored_name = msg.author_name or "?"
         if author_id and server_id:
             info = _registry.get_user_info(author_id, server_id)
             if info:
@@ -103,10 +112,10 @@ def _format_messages(data: list[dict]) -> str:
         else:
             author = stored_name
 
-        channel = msg.get("channel_name", "?")
-        content = msg.get("content",      "")
-        tags    = msg.get("tags") or []
-        summary = msg.get("summary") or ""
+        channel = msg.channel_name or "?"
+        content = msg.content or ""
+        tags    = msg.tags or []
+        summary = msg.summary or ""
         line    = f"[{ts}] #{channel} <{author}>: {content}"
         if tags:
             line += f"  [tags: {', '.join(tags)}]"
@@ -122,7 +131,7 @@ def _format_messages(data: list[dict]) -> str:
 
 async def _handle_recall_recent(args: dict[str, Any]) -> str:
     """Retrieve recent messages from Recall, optionally filtered by time window."""
-    data = await _recall_get("/messages/", args)
+    data = await _recall_query(**args)
     if data is None:
         return "Error: could not reach the memory store."
     if not data:
@@ -132,7 +141,11 @@ async def _handle_recall_recent(args: dict[str, Any]) -> str:
 
 async def _handle_recall_from_user(args: dict[str, Any]) -> str:
     """Retrieve messages from Recall filtered to a specific author."""
-    data = await _recall_get("/messages/", args)
+    # Bouncer sends 'author'; db accepts 'author_name'
+    db_args = {**args}
+    if "author" in db_args:
+        db_args["author_name"] = db_args.pop("author")
+    data = await _recall_query(**db_args)
     if data is None:
         return "Error: could not reach the memory store."
     if not data:
@@ -142,7 +155,7 @@ async def _handle_recall_from_user(args: dict[str, Any]) -> str:
 
 async def _handle_recall_by_topic(args: dict[str, Any]) -> str:
     """Retrieve messages from Recall filtered to a topic tag."""
-    data = await _recall_get("/messages/", args)
+    data = await _recall_query(**args)
     if data is None:
         return "Error: could not reach the memory store."
     if not data:
@@ -152,11 +165,11 @@ async def _handle_recall_by_topic(args: dict[str, Any]) -> str:
 
 async def _handle_search_memories(args: dict[str, Any]) -> str:
     """Full-text search through Recall messages."""
-    # The model uses the parameter name 'query'; the Recall API uses 'q'.
-    api_args = {**args}
-    if "query" in api_args:
-        api_args["q"] = api_args.pop("query")
-    data = await _recall_get("/messages/", api_args)
+    # The bouncer uses the parameter name 'query'; the DB uses 'q'.
+    db_args = {**args}
+    if "query" in db_args:
+        db_args["q"] = db_args.pop("query")
+    data = await _recall_query(**db_args)
     if data is None:
         return "Error: could not reach the memory store."
     if not data:

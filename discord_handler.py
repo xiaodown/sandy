@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 from PIL import Image
 
 from logconf import get_logger
+from recall import ChatDatabase
 from registry import Registry
 from last10 import Last10, resolve_mentions, SyntheticMessage, _SyntheticAuthor, _SyntheticGuild, _SyntheticChannel
 from memory import MemoryClient
@@ -48,7 +49,18 @@ registry = Registry()
 cache = Last10(maxlen=10, registry=registry)
 llm = OllamaInterface()
 vector_memory = VectorMemory()
-memory = MemoryClient(llm=llm, vector_memory=vector_memory)
+
+# Recall database — path built from DB_DIR + RECALL_DB_NAME so the test/prod
+# switch is controlled by a single env var.
+_db_dir = os.getenv("DB_DIR", "data/")
+_recall_db_name = os.getenv("RECALL_DB_NAME", "recall.db")
+recall_db = ChatDatabase(os.path.join(_db_dir, _recall_db_name))
+recall_db.init_db()
+
+# Give tools.py a reference to the shared Recall DB
+tools.init_recall_db(recall_db)
+
+memory = MemoryClient(db=recall_db, llm=llm, vector_memory=vector_memory)
 
 # Guard so cache seeding only runs once, even if on_ready fires on reconnect.
 _cache_seeded = False
@@ -331,7 +343,6 @@ if __name__ == "__main__":
             print(f"A Discord-related error occurred: {e}")
         finally:
             await bot.close()
-            await memory.close()
 
     try:
         asyncio.run(main())
