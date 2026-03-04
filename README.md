@@ -180,4 +180,4 @@ Sandy has six tools. The bouncer decides when to use them — the brain never ca
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+GPLv3. See [LICENSE](LICENSE).
