@@ -6,7 +6,7 @@ embeddings in ChromaDB for semantic RAG retrieval.
 
 Public API
 ----------
-    from recall import ChatDatabase
+    from sandy.recall import ChatDatabase
 
     db = ChatDatabase("data/prod/recall.db")
     db.init_db()
@@ -25,12 +25,12 @@ from typing import TYPE_CHECKING, Optional
 import discord
 from dotenv import load_dotenv
 
-from recall import ChatDatabase, ChatMessageCreate
+from .recall import ChatDatabase, ChatMessageCreate
 
 if TYPE_CHECKING:
-    from ollama_interface import OllamaInterface
-    from vector_memory import VectorMemory
-    from last10 import Last10
+    from .llm import OllamaInterface
+    from .vector_memory import VectorMemory
+    from .last10 import Last10
 
 load_dotenv()
 

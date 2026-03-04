@@ -26,8 +26,8 @@ from zoneinfo import ZoneInfo
 import httpx
 from dotenv import load_dotenv
 
-from recall import ChatDatabase
-from registry import Registry
+from .recall import ChatDatabase
+from .registry import Registry
 
 load_dotenv()
 

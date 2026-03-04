@@ -1,16 +1,6 @@
 """
-A discord interface for my AI chatbot
-It should:
-1.) come online and connect to the servers
-2.) be able to receive and parse chat messages
-3.) be able to send these messages elsewhere for decisions to be made about what to do with them
-4.) be able to send meta info to trigger a "typing..." rich presence
-5.) be able to send messages to a channel
-6.) gracefully handle disconnects and reconnects
-7.) all the above are required to be async
-
-Probably more to come.
-
+The discord interface for the bot.  Handles most of the logic and 
+general conducting of traffic.
 """
 
 
@@ -23,18 +13,18 @@ import discord
 from dotenv import load_dotenv
 from PIL import Image
 
-from logconf import get_logger
-from recall import ChatDatabase
-from registry import Registry
-from last10 import Last10, resolve_mentions, SyntheticMessage, _SyntheticAuthor, _SyntheticGuild, _SyntheticChannel
-from memory import MemoryClient
-from ollama_interface import OllamaInterface
-from vector_memory import VectorMemory
-import tools
+from .logconf import get_logger
+from .recall import ChatDatabase
+from .registry import Registry
+from .last10 import Last10, resolve_mentions, SyntheticMessage, _SyntheticAuthor, _SyntheticGuild, _SyntheticChannel
+from .memory import MemoryClient
+from .llm import OllamaInterface
+from .vector_memory import VectorMemory
+from . import tools
 
 load_dotenv()
 
-logger = get_logger("discord_handler")
+logger = get_logger("sandy.bot")
 
 intents = discord.Intents.default()
 intents.members = True
@@ -343,21 +333,3 @@ async def on_message(message: discord.Message):
     # Pass image_descriptions so Recall and RAG store the description text
     # rather than an empty content field.
     asyncio.create_task(memory.process_and_store(message, image_descriptions=image_descriptions))
-
-
-if __name__ == "__main__":
-    async def main():
-        try:
-            await bot.start(DISCORD_API_KEY)
-        except discord.LoginFailure as e:
-            print(f"Failed to log in: {e}")
-        except discord.DiscordException as e:
-            print(f"A Discord-related error occurred: {e}")
-        finally:
-            await bot.close()
-
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("^c caught - stand by, shutting down cleanly...")
-        pass  # Ctrl+C — clean shutdown already handled in main()'s finally block

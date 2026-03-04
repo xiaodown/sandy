@@ -10,18 +10,13 @@ Wraps the four LLM roles Sandy uses:
     Summarizer — small model; optionally summarises long messages before recall
 
 All four roles currently use the same model to avoid VRAM thrashing.
-Model names are read from the root .env:
-    BRAIN_MODEL       (default: mistral-small)
-    BOUNCER_MODEL     (default: mistral-small)
-    TAGGER_MODEL      (default: mistral-small)
-    SUMMARIZER_MODEL  (default: mistral-small)
-    EMBED_MODEL       (default: mxbai-embed-large — separate, for ChromaDB)
+Model names are read from the root .env - see the .env for details and notes.
 
 Structured outputs (bouncer / tagger / summarizer) use ollama's format= parameter
 with a Pydantic schema, which is far more reliable than asking the model to emit
 valid JSON by itself.
 
-The brain model does NOT do tool calling — tool selection is handled by the
+The brain model does not do tool calling — tool selection is handled by the
 bouncer, and the caller (discord_handler) executes the tool and injects results
 into the brain's context before asking it to respond.
 """
@@ -35,7 +30,7 @@ import ollama
 from pydantic import BaseModel, field_validator, model_validator
 from dotenv import load_dotenv
 
-from prompt import SandyPrompt
+from .prompt import SandyPrompt
 
 load_dotenv()
 
