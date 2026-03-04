@@ -1,5 +1,4 @@
 # custom stuff for this project
-history/database/
 *.pid
 *.log
 notes
@@ -8,6 +7,7 @@ data/*
 *.swp
 handover*
 .python-version
+*.egg-info/
 
 
 # Byte-compiled / optimized / DLL files

@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 from contextlib import contextmanager
 
-from recall.models import ChatMessageCreate, ChatMessageResponse
+from .models import ChatMessageCreate, ChatMessageResponse
 
 class ChatDatabase:
     """SQLite database handler for chat messages."""
