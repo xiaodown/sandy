@@ -7,6 +7,7 @@ notes
 data/*
 *.swp
 handover*
+.python-version
 
 
 # Byte-compiled / optimized / DLL files
