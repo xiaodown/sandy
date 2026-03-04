@@ -1,11 +1,45 @@
-"""Entry point for ``python -m sandy``."""
+"""Entry point for ``python -m sandy``.
 
+Usage:
+    python -m sandy          # prod mode (data/prod/, primary Discord key)
+    python -m sandy --test   # test mode (data/test/, test Discord key)
+"""
+
+import argparse
 import asyncio
+import os
 
-from .bot import bot, DISCORD_API_KEY, logger
+from dotenv import load_dotenv
+
+# Parse args BEFORE importing .bot — bot.py reads DB_DIR and DISCORD_API_KEY
+# at module level, so we need the env vars set first.
+load_dotenv()
+
+parser = argparse.ArgumentParser(description="Sandy — Discord personality bot")
+parser.add_argument(
+    "--test", action="store_true",
+    help="Run in test mode (data/test/ database, DISCORD_API_KEY_TEST token)",
+)
+args = parser.parse_args()
+
+if args.test:
+    os.environ["DB_DIR"] = "data/test/"
+    # Use the dedicated test token if available, otherwise keep whatever
+    # DISCORD_API_KEY is already set to (backwards-compatible).
+    test_key = os.getenv("DISCORD_API_KEY_TEST")
+    if test_key:
+        os.environ["DISCORD_API_KEY"] = test_key
+else:
+    # Default to prod unless .env already set something else
+    os.environ.setdefault("DB_DIR", "data/prod/")
+
+# NOW it's safe to import bot — all env vars are resolved.
+from .bot import bot, DISCORD_API_KEY, logger  # noqa: E402
 
 
 async def _main() -> None:
+    mode = "TEST" if args.test else "PROD"
+    logger.info("Starting Sandy in %s mode (DB_DIR=%s)", mode, os.environ.get("DB_DIR"))
     try:
         await bot.start(DISCORD_API_KEY)
     except Exception as exc:
