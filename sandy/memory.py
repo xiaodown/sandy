@@ -173,8 +173,7 @@ class MemoryClient:
         Safe to call once from on_ready.  Returns the total number of messages
         seeded (0 on any error, so a cold Recall is not fatal).
         """
-        from last10 import SyntheticMessage, _SyntheticAuthor, _SyntheticGuild, _SyntheticChannel
-        from datetime import timedelta
+        from .last10 import SyntheticMessage, _SyntheticAuthor, _SyntheticGuild, _SyntheticChannel
 
         try:
             # ChatDatabase methods are synchronous (sqlite3); run in a thread

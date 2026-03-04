@@ -42,8 +42,9 @@ intents.message_content = True
 bot = discord.Client(intents=intents)
 DISCORD_API_KEY = os.getenv("DISCORD_API_KEY")
 
-# Suppress default discord logging
-logging.getLogger("discord").propagate = False
+# Quiet the discord.py library — it's chatty at INFO but we still want
+# WARNING and above (including event-handler tracebacks).
+logging.getLogger("discord").setLevel(logging.WARNING)
 
 registry = Registry()
 cache = Last10(maxlen=10, registry=registry)
