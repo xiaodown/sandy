@@ -8,7 +8,7 @@ Public API
 ----------
     from recall import ChatDatabase
 
-    db = ChatDatabase("data/recall.db")
+    db = ChatDatabase("data/prod/recall.db")
     db.init_db()
     client = MemoryClient(db=db, llm=llm, vector_memory=vector_memory)
 
@@ -44,7 +44,7 @@ class MemoryClient:
     Create one instance and reuse it for the lifetime of the bot.
 
     Usage:
-        db = ChatDatabase("data/recall.db")
+        db = ChatDatabase("data/prod/recall.db")
         db.init_db()
         client = MemoryClient(db=db, llm=llm, vector_memory=vector_memory)
         await client.process_and_store(message)

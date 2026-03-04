@@ -29,7 +29,10 @@ class Registry:
     """
 
     def __init__(self):
-        dbpath = os.getenv("DB_DIR") + os.getenv("SERVER_DB_NAME")
+        dbpath = os.path.join(
+            os.getenv("DB_DIR", "data/prod/"),
+            os.getenv("SERVER_DB_NAME", "server.db"),
+        )
         self.db_path = dbpath
         self._initialize_db()
 

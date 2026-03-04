@@ -15,7 +15,7 @@ scoped to the current guild and cannot leak across servers.
 
 Storage path
 ------------
-Reads DB_DIR from .env (default "data/") and stores Chroma files in
+Reads DB_DIR from .env (default "data/prod/") and stores Chroma files in
 <DB_DIR>/chroma/.  No separate server or daemon required — ChromaDB runs
 embedded in-process, writes to disk on mutation, exactly like SQLite.
 
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 _PACIFIC      = ZoneInfo("America/Los_Angeles")
 _EMBED_MODEL  = os.getenv("EMBED_MODEL", "mxbai-embed-large")
-_CHROMA_PATH  = os.path.join(os.getenv("DB_DIR", "data").rstrip("/\\"), "chroma")
+_CHROMA_PATH  = os.path.join(os.getenv("DB_DIR", "data/prod").rstrip("/\\"), "chroma")
 _COLLECTION   = "sandy_messages"
 
 # Cosine distance threshold — results above this value are discarded as

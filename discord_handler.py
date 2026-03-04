@@ -52,7 +52,7 @@ vector_memory = VectorMemory()
 
 # Recall database — path built from DB_DIR + RECALL_DB_NAME so the test/prod
 # switch is controlled by a single env var.
-_db_dir = os.getenv("DB_DIR", "data/")
+_db_dir = os.getenv("DB_DIR", "data/prod/")
 _recall_db_name = os.getenv("RECALL_DB_NAME", "recall.db")
 recall_db = ChatDatabase(os.path.join(_db_dir, _recall_db_name))
 recall_db.init_db()
@@ -275,6 +275,13 @@ async def on_message(message: discord.Message):
     history = cache.get(message.guild.id, message.channel.id)
     bouncer_result = await llm.ask_bouncer(history.format(), bot_name=bot.user.display_name)
 
+    logger.info(
+        "Bouncer → respond=%s tool=%s(%s)",
+        bouncer_result.should_respond,
+        bouncer_result.recommended_tool or "none",
+        bouncer_result.use_tool,
+    )
+
     if bouncer_result.should_respond:
         # Show "Sandy is typing..." for the entire duration of tool call +
         # LLM generation.  channel.typing() is an async context manager that
@@ -289,6 +296,11 @@ async def on_message(message: discord.Message):
                         bouncer_result.recommended_tool,
                     )
                 else:
+                    logger.info(
+                        "Dispatching tool %s with params %s",
+                        bouncer_result.recommended_tool,
+                        bouncer_result.tool_parameters or {},
+                    )
                     tool_result = await tools.dispatch(
                         bouncer_result.recommended_tool,
                         bouncer_result.tool_parameters or {},
