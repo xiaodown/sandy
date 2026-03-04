@@ -1,29 +1,31 @@
 """
-Recall client — sends Discord messages to the Recall API for long-term storage.
+Memory client — persists Discord messages to Recall (SQLite) for long-term storage.
 
-Recall host/port are read from the root .env (RECALL_HOST / RECALL_PORT)
-so the bot and the API can run on different machines if
-needed.
+Also handles the tag+summarize pipeline via the LLM, and stores
+embeddings in ChromaDB for semantic RAG retrieval.
 
 Public API
 ----------
-    client = MemoryClient()
+    from recall import ChatDatabase
 
-    # Store without tags (use this until the LLM tagger is wired up)
-    await client.store_message(message)
+    db = ChatDatabase("data/recall.db")
+    db.init_db()
+    client = MemoryClient(db=db, llm=llm, vector_memory=vector_memory)
 
-    # Store with tags + optional summary (call this from the LLM tagger later)
-    await client.store_message_with_tags(message, tags=["game", "tarkov"], summary="...")
+    # Full pipeline: tag → summarize → store in Recall + RAG
+    await client.process_and_store(message)
 """
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
-import httpx
 import discord
 from dotenv import load_dotenv
+
+from recall import ChatDatabase, ChatMessageCreate
 
 if TYPE_CHECKING:
     from ollama_interface import OllamaInterface
@@ -34,41 +36,30 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-RECALL_BASE_URL = (
-    f"http://{os.getenv('RECALL_HOST', '127.0.0.1')}"
-    f":{os.getenv('RECALL_PORT', '8000')}"
-)
-
 
 class MemoryClient:
     """
-    Async client for storing Discord messages in the Recall API.
+    Stores Discord messages in Recall (SQLite) and ChromaDB (vector).
 
-    Uses a persistent httpx.AsyncClient for connection pooling. Create one
-    instance and reuse it for the lifetime of the bot.
+    Create one instance and reuse it for the lifetime of the bot.
 
     Usage:
-        client = MemoryClient()
-        await client.store_message(message)
-        # later, from the LLM tagger:
-        await client.store_message_with_tags(message, tags=["fun"], summary="...")
+        db = ChatDatabase("data/recall.db")
+        db.init_db()
+        client = MemoryClient(db=db, llm=llm, vector_memory=vector_memory)
+        await client.process_and_store(message)
     """
 
     #: Messages longer than this get passed through the summarizer before storage.
-    # Cast to int: os.getenv() returns str when the var is set, which breaks the
-    # len() > threshold comparison at runtime.
     SUMMARIZE_THRESHOLD = int(os.getenv('SUMMARIZE_THRESHOLD', 144))
 
     def __init__(
         self,
-        base_url: str = RECALL_BASE_URL,
-        timeout: float = 10.0,
+        db: ChatDatabase,
         llm: "Optional[OllamaInterface]" = None,
         vector_memory: "Optional[VectorMemory]" = None,
     ):
-        self._base_url = base_url.rstrip("/")
-        self._timeout = timeout
-        self._client = httpx.AsyncClient(timeout=self._timeout)
+        self._db = db
         self._llm = llm
         self._vector_memory = vector_memory
 
@@ -121,7 +112,7 @@ class MemoryClient:
             if len(content_for_storage) > self.SUMMARIZE_THRESHOLD:
                 summary = await self._llm.ask_summarizer(content_for_storage)
 
-        stored = await self._post(message, tags=tags or None, summary=summary, content_override=content_for_storage or None)
+        stored = self._store(message, tags=tags or None, summary=summary, content_override=content_for_storage or None)
 
         # Embed and store in the vector memory for semantic RAG retrieval.
         # message.id is always a real Discord snowflake here — process_and_store
@@ -157,7 +148,7 @@ class MemoryClient:
         Use process_and_store() for the full tag+summarize+store pipeline.
         Returns True on success, False on any error.
         """
-        return await self._post(message, tags=None, summary=None)
+        return self._store(message, tags=None, summary=None)
 
     async def store_message_with_tags(
         self,
@@ -170,7 +161,7 @@ class MemoryClient:
         tags     — list of normalized lowercase strings, e.g. ["game", "tarkov"]
         summary  — optional one-line LLM summary of the message
         """
-        return await self._post(message, tags=tags, summary=summary)
+        return self._store(message, tags=tags, summary=summary)
 
     async def seed_cache(self, cache: "Last10", hours: int = 24) -> int:
         """Seed the in-memory rolling cache from Recall on bot startup.
@@ -183,23 +174,25 @@ class MemoryClient:
         seeded (0 on any error, so a cold Recall is not fatal).
         """
         from last10 import SyntheticMessage, _SyntheticAuthor, _SyntheticGuild, _SyntheticChannel
+        from datetime import timedelta
 
         try:
-            response = await self._client.get(
-                f"{self._base_url}/messages/",
-                params={"hours_ago": hours, "limit": 1000},
+            # ChatDatabase methods are synchronous (sqlite3); run in a thread
+            # to avoid blocking the event loop.
+            rows = await asyncio.to_thread(
+                self._db.get_messages,
+                hours_ago=hours,
+                limit=1000,
             )
-            response.raise_for_status()
-            raw: list[dict] = response.json()
         except Exception as exc:
             logger.error("seed_cache: failed to fetch from Recall — %s", exc)
             return 0
 
         # Recall returns newest-first (ORDER BY timestamp DESC).
         # Group by channel, preserving that order so we can slice cheaply.
-        groups: dict[tuple[int, int], list[dict]] = {}
-        for m in raw:
-            key = (m["server_id"], m["channel_id"])
+        groups: dict[tuple[int, int], list] = {}
+        for m in rows:
+            key = (m.server_id, m.channel_id)
             groups.setdefault(key, []).append(m)
 
         maxlen = cache.maxlen
@@ -209,24 +202,23 @@ class MemoryClient:
             # add them oldest-first — matching the deque's expected append order.
             recent = list(reversed(msgs[:maxlen]))
             for m in recent:
-                ts = m["timestamp"]
-                created_at = datetime.fromisoformat(ts)
+                created_at = m.timestamp
                 if created_at.tzinfo is None:
                     created_at = created_at.replace(tzinfo=timezone.utc)
                 sm = SyntheticMessage(
-                    content=m["content"],
+                    content=m.content,
                     created_at=created_at,
                     author=_SyntheticAuthor(
-                        id=m["author_id"],
-                        display_name=m["author_name"],
+                        id=m.author_id,
+                        display_name=m.author_name,
                     ),
                     guild=_SyntheticGuild(
-                        id=m["server_id"],
-                        name=m["server_name"],
+                        id=m.server_id,
+                        name=m.server_name,
                     ),
                     channel=_SyntheticChannel(
-                        id=m["channel_id"],
-                        name=m["channel_name"],
+                        id=m.channel_id,
+                        name=m.channel_name,
                     ),
                 )
                 cache.add(sm)
@@ -238,68 +230,44 @@ class MemoryClient:
         )
         return count
 
-    async def close(self) -> None:
-        """Cleanly close the underlying HTTP client. Call on bot shutdown."""
-        await self._client.aclose()
-
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    async def _post(
+    def _store(
         self,
         message: discord.Message,
         tags: Optional[list[str]],
         summary: Optional[str],
         content_override: Optional[str] = None,
     ) -> bool:
-        """Build the payload and POST to /messages/. Returns True on 200/201.
+        """Create a ChatMessageCreate and insert directly into Recall.
 
         content_override — when set, stored as the message content instead of
         message.content.  Used for image messages where we want the description,
         not an empty string, in Recall.
+
+        Returns True on success, False on any error.
         """
-        payload = {
-            "author_id":    message.author.id,
-            "author_name":  message.author.display_name,
-            "channel_id":   message.channel.id,
-            "channel_name": message.channel.name,
-            "server_id":    message.guild.id,
-            "server_name":  message.guild.name,
-            "content":      content_override or message.content or "(no text content)",
-            "timestamp":    message.created_at.isoformat(),
-        }
-        if tags is not None:
-            payload["tags"] = tags
-        if summary is not None:
-            payload["summary"] = summary
-
+        msg = ChatMessageCreate(
+            author_id=message.author.id,
+            author_name=message.author.display_name,
+            channel_id=message.channel.id,
+            channel_name=message.channel.name,
+            server_id=message.guild.id,
+            server_name=message.guild.name,
+            content=content_override or message.content or "(no text content)",
+            timestamp=message.created_at,
+            tags=tags,
+            summary=summary,
+        )
         try:
-            response = await self._client.post(
-                f"{self._base_url}/messages/",
-                json=payload,
-            )
-            response.raise_for_status()
+            self._db.create_message(msg)
             return True
-        except httpx.ConnectError:
-            logger.warning(
-                "Recall server unreachable at %s — message not stored (channel %s)",
-                self._base_url,
-                message.channel.id,
-            )
-        except httpx.TimeoutException:
-            logger.warning(
-                "Recall server timed out — message not stored (channel %s)",
-                message.channel.id,
-            )
-        except httpx.HTTPStatusError as e:
+        except Exception as exc:
             logger.error(
-                "Recall returned %s for message in channel %s: %s",
-                e.response.status_code,
+                "Recall store failed for message in channel %s: %s",
                 message.channel.id,
-                e.response.text,
+                exc,
             )
-        except Exception as e:
-            logger.exception("Unexpected error storing message in Recall: %s", e)
-
-        return False
+            return False

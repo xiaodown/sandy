@@ -32,7 +32,7 @@ import os
 from typing import Any, Optional
 
 import ollama
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from dotenv import load_dotenv
 
 from prompt import SandyPrompt
@@ -99,6 +99,22 @@ class BouncerResponse(BaseModel):
     use_tool: bool = False
     recommended_tool: Optional[str] = None
     tool_parameters: Optional[dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def _tool_fields_consistent(self) -> "BouncerResponse":
+        """If the model set use_tool but forgot to name a tool, zero it out.
+
+        This prevents a use_tool=True / recommended_tool=None mismatch from
+        propagating — the discord_handler guard would catch it anyway, but
+        fixing it here keeps the log line honest too.
+        """
+        if self.use_tool and not self.recommended_tool:
+            logger.warning(
+                "Bouncer set use_tool=True but recommended_tool is empty — forcing use_tool=False",
+            )
+            self.use_tool = False
+            self.tool_parameters = None
+        return self
 
 class TaggerResponse(BaseModel):
     """Structured output for the Tagger role."""
