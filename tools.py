@@ -74,6 +74,11 @@ async def _recall_query(**kwargs: Any) -> list | None:
         logger.error("Recall DB not initialised — call init_recall_db() first")
         return None
     clean = {k: v for k, v in kwargs.items() if v is not None}
+    # The bouncer uses 'author' and 'query'; the DB expects 'author_name' and 'q'.
+    if "author" in clean:
+        clean["author_name"] = clean.pop("author")
+    if "query" in clean:
+        clean["q"] = clean.pop("query")
     try:
         return await asyncio.to_thread(_recall_db.get_messages, **clean)
     except Exception as exc:
@@ -141,11 +146,7 @@ async def _handle_recall_recent(args: dict[str, Any]) -> str:
 
 async def _handle_recall_from_user(args: dict[str, Any]) -> str:
     """Retrieve messages from Recall filtered to a specific author."""
-    # Bouncer sends 'author'; db accepts 'author_name'
-    db_args = {**args}
-    if "author" in db_args:
-        db_args["author_name"] = db_args.pop("author")
-    data = await _recall_query(**db_args)
+    data = await _recall_query(**args)
     if data is None:
         return "Error: could not reach the memory store."
     if not data:
@@ -165,11 +166,7 @@ async def _handle_recall_by_topic(args: dict[str, Any]) -> str:
 
 async def _handle_search_memories(args: dict[str, Any]) -> str:
     """Full-text search through Recall messages."""
-    # The bouncer uses the parameter name 'query'; the DB uses 'q'.
-    db_args = {**args}
-    if "query" in db_args:
-        db_args["q"] = db_args.pop("query")
-    data = await _recall_query(**db_args)
+    data = await _recall_query(**args)
     if data is None:
         return "Error: could not reach the memory store."
     if not data:
