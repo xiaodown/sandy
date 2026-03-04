@@ -437,10 +437,9 @@ async def dispatch(
 
     try:
         result = await handler(arguments)
-        # Log first line of result so it's easy to see what came back without
-        # flooding the log with full message dumps.
-        first_line = result.splitlines()[0] if result else "(empty)"
-        logger.info("Tool %s returned: %s", tool_name, first_line)
+        # Log a useful preview of what came back.
+        preview = result[:200] if result else "(empty)"
+        logger.info("Tool %s returned (%d chars): %s", tool_name, len(result or ""), preview)
         return result
     except Exception as exc:
         logger.error("Tool %r raised: %s", tool_name, exc)
