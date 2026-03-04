@@ -1,6 +1,16 @@
 """
-The discord interface for the bot.  Handles most of the logic and 
-general conducting of traffic.
+Sandy's Discord bot — the main event loop.
+
+Handles the full message pipeline:
+  1. Receive message via discord.py on_message
+  2. Vision: describe any image attachments
+  3. Bouncer: decide whether to respond and whether to use a tool
+  4. Tool dispatch: execute the recommended tool, if any
+  5. RAG: query vector memory for semantically similar past messages
+  6. Brain: generate Sandy's reply with all context injected
+  7. Memory: tag, summarize, store to Recall + embed to ChromaDB (background)
+
+Entry point is ``python -m sandy`` (see __main__.py).
 """
 
 
