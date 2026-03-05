@@ -128,6 +128,9 @@ Respond NO if:
 - Pure reaction with no content (single emoji, "lol", "k")
 - {bot_name} just spoke AND the latest message adds nothing new
 - Looks like the first half of a two-part message
+- {bot_name} was the most recent speaker in the chat
+- {bot_name} has already answered the question or contributed her input to the most recent user message
+- The humans would feel awkward if {bot_name} spoke up
 
 When unsure, lean slightly YES.
 
@@ -165,7 +168,7 @@ Available tools:
   Use when: someone asks what time/day it is, or the current date or time is needed.
 
 **dice_roll** — roll one or more groups of dice.
-  Parameters: dice (array of {sides: int, count: int}, REQUIRED) — each entry is a group of `count` dice with `sides` sides (sides clamped 1–100, count clamped 1–10)
+  Parameters: dice (array of {{sides: int, count: int}}, REQUIRED) — each entry is a group of `count` dice with `sides` sides (sides clamped 1-100, count clamped 1-10)
   Use when: someone asks to roll dice, e.g. "roll 2d6", "4d12 and 2 six-sided dice", "give me a d20".
 
 If respond=NO, always set use_tool to false.
