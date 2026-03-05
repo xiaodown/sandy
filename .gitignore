@@ -8,6 +8,7 @@ data/*
 handover*
 .python-version
 *.egg-info/
+.github*
 
 
 # Byte-compiled / optimized / DLL files
