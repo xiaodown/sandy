@@ -19,6 +19,7 @@ handler, regardless of what the model provided.
 import asyncio
 import logging
 import os
+import random
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -133,6 +134,21 @@ def _format_messages(data: list) -> str:
 # ---------------------------------------------------------------------------
 # Tool handlers — one async function per tool
 # ---------------------------------------------------------------------------
+
+async def _handle_dice_roll(args: dict[str, Any]) -> str:
+    """Roll one or more groups of dice and return the results."""
+    dice_groups = args.get("dice", [])
+    if not dice_groups:
+        return "Error: no dice specified."
+    lines = []
+    for group in dice_groups:
+        sides = max(1, min(100, int(group.get("sides", 6))))
+        count = max(1, min(10, int(group.get("count", 1))))
+        rolls = [random.randint(1, sides) for _ in range(count)]
+        die_word = "die" if count == 1 else "dice"
+        lines.append(f"rolled {count} {sides}-sided {die_word}: {' '.join(str(r) for r in rolls)}")
+    return "\n".join(lines)
+    
 
 async def _handle_recall_recent(args: dict[str, Any]) -> str:
     """Retrieve recent messages from Recall, optionally filtered by time window."""
@@ -368,6 +384,34 @@ TOOL_SCHEMAS: list[dict] = [
             },
         },
     },
+        {
+        "type": "function",
+        "function": {
+            "name": "dice_roll",
+            "description": (
+                "Rolls one or more groups of dice and returns the results. "
+                "Use this when someone asks to roll dice, e.g. '2d6', '4d12 and 2d20'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dice": {
+                        "type": "array",
+                        "description": "List of dice groups to roll",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "sides": {"type": "integer", "description": "Number of sides on each die (1–100)"},
+                                "count": {"type": "integer", "description": "Number of dice to roll (1–10)"},
+                            },
+                            "required": ["sides", "count"],
+                        },
+                    },
+                },
+                "required": ["dice"],
+            },
+        },
+    },
 ]
 
 # Map tool name → handler function.
@@ -378,6 +422,7 @@ _HANDLERS: dict[str, Any] = {
     "search_memories":  _handle_search_memories,
     "get_current_time": _handle_get_current_time,
     "search_web":       _handle_search_web,
+    "dice_roll":        _handle_dice_roll,
 }
 
 # Tools that query per-server data and require server_id injection.

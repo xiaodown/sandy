@@ -164,6 +164,10 @@ Available tools:
   Parameters: none
   Use when: someone asks what time/day it is, or the current date or time is needed.
 
+**dice_roll** — roll one or more groups of dice.
+  Parameters: dice (array of {sides: int, count: int}, REQUIRED) — each entry is a group of `count` dice with `sides` sides (sides clamped 1–100, count clamped 1–10)
+  Use when: someone asks to roll dice, e.g. "roll 2d6", "4d12 and 2 six-sided dice", "give me a d20".
+
 If respond=NO, always set use_tool to false.
 If use_tool=true, you MUST also set recommended_tool to one of the tool names above AND populate tool_parameters with the appropriate arguments. Never set use_tool=true without specifying which tool to use.
 
