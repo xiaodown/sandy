@@ -97,6 +97,11 @@ Key env vars:
 | `BOUNCER_TEMPERATURE` | Bouncer determinism | `0.1` |
 | `BRAIN_NUM_PREDICT` | Max tokens per reply | `512` |
 | `BRAIN_NUM_CTX` | Context window size | `8192` |
+| `BOUNCER_NUM_CTX` | Bouncer context window size | `8192` |
+| `TAGGER_NUM_CTX` | Tagger context window size | `4096` |
+| `SUMMARIZER_NUM_CTX` | Summarizer context window size | `4096` |
+| `VISION_NUM_CTX` | Vision context window size | `8192` |
+| `PREWARM_NUM_CTX` | Prewarm context window size | `BOUNCER_NUM_CTX` |
 | `OLLAMA_KEEP_ALIVE` | VRAM model retention | `1h` |
 | `SUMMARIZE_THRESHOLD` | Chars before summarizing | `450` |
 | `SERVER_DB_NAME` | Registry DB filename | `server.db` |
@@ -171,6 +176,36 @@ The bouncer has an incoherence detector: if it says `should_respond=False` but i
 
 There is also a Pydantic `model_validator` on `BouncerResponse` that forces `use_tool=False` when `recommended_tool` is empty — prevents a `use_tool=True` / `recommended_tool=None` mismatch.
 
+### Context sizing matters more than expected
+
+- As of 2026-03-11, Sandy sets explicit `num_ctx` values for brain, bouncer, tagger, summarizer, vision, and prewarm via `.env`. This is not optional polish; it materially changes VRAM use and runner behavior.
+- One debugging session on dual 3090s showed that leaving non-brain calls without explicit `num_ctx` let ollama inherit the model's huge default context, which produced:
+  - `requested context size too large for model num_ctx=262144 n_ctx_train=131072`
+  - a 131072-token runner
+  - ~20 GiB KV cache
+  - weight splitting across both GPUs
+  - misleading "VRAM thrash" symptoms in `nvtop`
+- After adding explicit per-role context limits, the same 24B Mistral model fit comfortably on a single 3090 for normal Sandy operation. Do not assume "it used both GPUs before, therefore it needs both GPUs." That assumption was wrong.
+- If the same model is used for multiple roles with different `num_ctx` values, ollama may still spin up separate runners per context size. If you want maximum runner reuse while using one model for everything, unify the role context sizes.
+
+### Prewarm behavior
+
+- `warm_model()` is async now and uses the shared `AsyncClient`, the shared `asyncio.Lock`, explicit `keep_alive`, and explicit `PREWARM_NUM_CTX`.
+- Prewarming now happens in `__main__.py` before `bot.start(...)`, not inside `on_ready()`. This avoids blocking Discord startup callbacks on model loading.
+- If you ever see a fresh `POST /api/generate` followed by a giant-context warning in the ollama logs again, assume the prewarm path regressed first.
+
+### Actual runtime shape
+
+- One user turn can still hit ollama multiple times even without tools:
+  - bouncer chat
+  - RAG embed query
+  - brain chat
+  - tagger chat
+  - optional summarizer chat
+  - embed for vector storage
+- The embed model (`mxbai-embed-large`) is a separate ollama runner and will continue to appear as a small single-GPU load. That is expected.
+- The current "same big model for brain/bouncer/tagger/summarizer/vision" setup is intentionally suboptimal and was originally a desktop-VRAM compromise. On the homelab box, revisiting role-specific models is now practical.
+
 ## Conventions
 
 - Imports within the `sandy/` package are relative (`from .module import Thing`)
@@ -183,10 +218,24 @@ There is also a Pydantic `model_validator` on `BouncerResponse` that forces `use
 
 - `format=` and `tools=` are mutually exclusive in the ollama API. If you try to use both, you'll get an error.
 - `PREWARM_MODEL_NAME="${BOUNCER_MODEL}"` in `.env` — python-dotenv expands shell variable references.
-- The `warm_model()` method in `llm.py` uses synchronous `ollama.generate()` — it intentionally blocks until the model is loaded into VRAM.  This is undesirable and should eventually be fixed.
+- Historical note: `warm_model()` used to call synchronous `ollama.generate()` from `on_ready()`, which could block startup and accidentally inherit a huge model default context. That was fixed on 2026-03-11.
 - `KNOWN_TOOLS` in `tools.py` is a `frozenset` derived from `_HANDLERS.keys()`. It stays in sync automatically. `bot.py` checks incoming bouncer recommendations against it.
 - ChromaDB runs embedded in-process (no separate server). It writes to `<DB_DIR>/chroma/`.
 - `notes` in the repo root is a flat text file, not a directory.  Actually, nevermind, the human deleted it.  Ok, `notes` doesn't exist, ignore.
 - The bouncer prompt in `prompt.py` contains inline tool documentation (names, params, when-to-use). If you add a tool, you must update the bouncer prompt manually — it does not auto-generate from schemas.
 - Tool results are not stored in RAG or Recall. They're injected into context for one turn only. This is intentional.
-- Ollama's default context window is 2048 regardless of model capability. `BRAIN_NUM_CTX` must be set explicitly in `.env` to get more.
+- Ollama's default context behavior is not something to trust blindly. Sandy now sets explicit context sizes per role; if a new ollama call site is added without a `num_ctx`, expect trouble.
+
+## Recommended Next Work
+
+The old high-level plan in the root project notes still mostly stands, but the practical near-term order is clearer now:
+
+1. Finish Phase 1 hardening around the text pipeline:
+   reply-length handling, send-path robustness, and supervised background work.
+2. Add per-turn trace IDs and stage timing/logging before chasing more features.
+   The biggest remaining weakness is that Sandy is still not inspectable enough.
+3. Revisit role-specific models now that the VRAM picture is understood.
+   Keeping one 24B multimodal model for every role was a temporary compromise, not a good architecture.
+4. Keep voice work out of scope until the text bot is observable and boring.
+
+If another agent needs a single concrete next task, "add per-turn tracing and stage latency logs" is the best choice. It supports the project plan, teaches useful ops skills, and reduces future debugging by a lot.
