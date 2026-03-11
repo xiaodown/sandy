@@ -34,13 +34,21 @@ else:
     os.environ.setdefault("DB_DIR", "data/prod/")
 
 # NOW it's safe to import bot — all env vars are resolved.
-from .bot import bot, DISCORD_API_KEY, logger  # noqa: E402
+from .bot import bot, DISCORD_API_KEY, llm, logger  # noqa: E402
 
 
 async def _main() -> None:
     mode = "TEST" if args.test else "PROD"
     logger.info("Starting Sandy in %s mode (DB_DIR=%s)", mode, os.environ.get("DB_DIR"))
     try:
+        prewarm_enabled = os.getenv("PREWARM_MODEL") == "True"
+        prewarm_model_name = os.getenv("PREWARM_MODEL_NAME")
+        if prewarm_enabled and prewarm_model_name:
+            logger.info("Beginning pre-warming of model %s before Discord connect", prewarm_model_name)
+            if await llm.warm_model(prewarm_model_name):
+                logger.info("Pre-warming model %s complete", prewarm_model_name)
+            else:
+                logger.warning("Pre-warming of model %s failed", prewarm_model_name)
         await bot.start(DISCORD_API_KEY)
     except Exception as exc:
         logger.error("Fatal: %s", exc)
