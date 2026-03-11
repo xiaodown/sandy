@@ -194,20 +194,12 @@ def _build_augmented_content(message: discord.Message, descriptions: list[str]) 
 async def on_ready():
     """Event handler for when the bot is ready."""
     global _cache_seeded
-    PREWARM_MODEL = os.getenv("PREWARM_MODEL")
-    PREWARM_MODEL_NAME = os.getenv("PREWARM_MODEL_NAME")
 
     logger.info("Logged in as %s (%s)", bot.user.name, bot.user.id)
     if not _cache_seeded:
         seeded = await memory.seed_cache(cache)
         logger.info("Cache seeded with %d message(s) from Recall", seeded)
         _cache_seeded = True
-        if PREWARM_MODEL == "True":
-            logger.info("Beginning pre-warming of model...")
-            if await llm.warm_model(PREWARM_MODEL_NAME):
-                logger.info("Pre-warming model %s complete", PREWARM_MODEL_NAME)
-            else:
-                logger.warning("Pre-warming of model %s failed", PREWARM_MODEL_NAME)
         ready_info=f"       ###   BOT READY   ###\n\n"
         ready_info+=f"      * bot logged in as {bot.user.name} ({bot.user.id})\n"
         guild_count = 0

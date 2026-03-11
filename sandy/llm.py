@@ -57,6 +57,11 @@ _SUMMARIZER_MODEL = os.getenv("SUMMARIZER_MODEL", "hf.co/bartowski/Llama-3.2-3B-
 _BRAIN_TEMPERATURE = float(os.getenv("BRAIN_TEMPERATURE", "1.1"))
 _BRAIN_NUM_PREDICT = int(os.getenv("BRAIN_NUM_PREDICT", "512"))
 _BRAIN_NUM_CTX     = int(os.getenv("BRAIN_NUM_CTX", "8192"))
+_BOUNCER_NUM_CTX   = int(os.getenv("BOUNCER_NUM_CTX", "8192"))
+_TAGGER_NUM_CTX    = int(os.getenv("TAGGER_NUM_CTX", "4096"))
+_SUMMARIZER_NUM_CTX = int(os.getenv("SUMMARIZER_NUM_CTX", "4096"))
+_VISION_NUM_CTX    = int(os.getenv("VISION_NUM_CTX", "8192"))
+_PREWARM_NUM_CTX   = int(os.getenv("PREWARM_NUM_CTX", str(_BOUNCER_NUM_CTX)))
 
 # Vision model — describes image attachments. Defaults to brain model so no extra
 # VRAM is consumed. Override with VISION_MODEL in .env if you ever want a dedicated
@@ -171,23 +176,28 @@ class OllamaInterface:
             return False
 
     # -----------------------------------------------------------------
-    # Warmer - force ollama to load a model into vram when on_ready
+    # Warmer - force ollama to load a model into vram before Discord connects
     # -----------------------------------------------------------------
-    
-    async def warm_model(self, model_name):
+
+    async def warm_model(self, model_name: str) -> bool:
         """
-        Sends an empty prompt to the ollama api to load a model into vram, 
-        reducing the time it takes for the first response after restart
-        (i mean not really but you know what warming does)
+        Send a minimal generate request so ollama loads the model with a
+        predictable keepalive and context size.
         """
         try:
-            _ = ollama.generate(
-                model=model_name,
-                prompt=""
-            )
+            async with self._lock:
+                await self._client.generate(
+                    model=model_name,
+                    prompt="",
+                    keep_alive=_KEEP_ALIVE,
+                    options={
+                        "num_ctx": _PREWARM_NUM_CTX,
+                        "num_predict": 0,
+                    },
+                )
             return True
         except Exception as e:
-            logger.error("Error occured when warming %s: %s", 
+            logger.error("Error occured when warming %s: %s",
                          model_name, e)
             return False
 
@@ -218,6 +228,7 @@ class OllamaInterface:
                         {"role": "user",   "content": prompt.user, "images": [image_bytes]},
                     ],
                     keep_alive=_KEEP_ALIVE,
+                    options={"num_ctx": _VISION_NUM_CTX},
                 )
             desc = (response.message.content or "").strip()
             logger.debug("Vision → %d chars", len(desc))
@@ -251,7 +262,10 @@ class OllamaInterface:
                     ],
                     format=BouncerResponse.model_json_schema(),
                     keep_alive=_KEEP_ALIVE,
-                    options={"temperature": _BOUNCER_TEMPERATURE},
+                    options={
+                        "temperature": _BOUNCER_TEMPERATURE,
+                        "num_ctx": _BOUNCER_NUM_CTX,
+                    },
                 )
             result = BouncerResponse.model_validate_json(response.message.content)
             # If the model voted NO but its reason contains clear YES-signal phrases,
@@ -316,7 +330,10 @@ class OllamaInterface:
                     ],
                     format=TaggerResponse.model_json_schema(),
                     keep_alive=_KEEP_ALIVE,
-                    options={"temperature": _TAGGER_TEMPERATURE},
+                    options={
+                        "temperature": _TAGGER_TEMPERATURE,
+                        "num_ctx": _TAGGER_NUM_CTX,
+                    },
                 )
             result = TaggerResponse.model_validate_json(response.message.content)
             logger.debug("Tagger → tags=%r", result.tags)
@@ -349,7 +366,10 @@ class OllamaInterface:
                     ],
                     format=SummarizerResponse.model_json_schema(),
                     keep_alive=_KEEP_ALIVE,
-                    options={"temperature": _SUMMARIZER_TEMPERATURE},
+                    options={
+                        "temperature": _SUMMARIZER_TEMPERATURE,
+                        "num_ctx": _SUMMARIZER_NUM_CTX,
+                    },
                 )
             result = SummarizerResponse.model_validate_json(response.message.content)
             logger.debug("Summarizer → summary=%r", result.summary)
