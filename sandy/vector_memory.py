@@ -29,6 +29,7 @@ async ollama Python client.
 import logging
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import chromadb
@@ -41,7 +42,6 @@ logger = logging.getLogger(__name__)
 
 _PACIFIC      = ZoneInfo("America/Los_Angeles")
 _EMBED_MODEL  = os.getenv("EMBED_MODEL", "mxbai-embed-large")
-_CHROMA_PATH  = os.path.join(os.getenv("DB_DIR", "data/prod").rstrip("/\\"), "chroma")
 _COLLECTION   = "sandy_messages"
 
 # Cosine distance threshold — results above this value are discarded as
@@ -74,8 +74,14 @@ class VectorMemory:
     """
 
     def __init__(self) -> None:
-        os.makedirs(_CHROMA_PATH, exist_ok=True)
-        self._chroma = chromadb.PersistentClient(path=_CHROMA_PATH)
+        db_dir = os.getenv("DB_DIR", "data/prod/").rstrip("/\\") or "data/prod"
+        chroma_path = Path(db_dir) / "chroma"
+        chroma_path.mkdir(parents=True, exist_ok=True)
+        try:
+            self._chroma = chromadb.PersistentClient(path=str(chroma_path))
+        except Exception as exc:
+            logger.error("VectorMemory startup failed for path %r: %s", str(chroma_path), exc)
+            raise
         self._collection = self._chroma.get_or_create_collection(
             name=_COLLECTION,
             metadata={"hnsw:space": "cosine"},
@@ -83,7 +89,7 @@ class VectorMemory:
         self._embed_client = ollama.AsyncClient()
         logger.info(
             "VectorMemory ready (path=%r, collection=%r, docs=%d)",
-            _CHROMA_PATH, _COLLECTION, self._collection.count(),
+            str(chroma_path), _COLLECTION, self._collection.count(),
         )
 
     # ------------------------------------------------------------------

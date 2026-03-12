@@ -68,7 +68,8 @@ cp .env.example .env
 The `.env` is well-commented and broken into sections. The important bits:
 
 - `DISCORD_API_KEY` — your bot token (see [Creating a Discord bot](#creating-a-discord-bot) below)
-- `DB_DIR` — set to `data/prod/` or `data/test/` to switch between database sets
+- `DB_DIR` — production database directory
+- `TEST_DB_DIR` — database directory used automatically by `python -m sandy --test`
 - `BRAIN_MODEL`, `BOUNCER_MODEL`, etc. — ollama model tags. All roles can use the same model to avoid VRAM thrashing
 - `EMBED_MODEL` — embedding model for ChromaDB (default: `mxbai-embed-large`)
 
@@ -122,7 +123,7 @@ data/
 └── test/           # test databases (same structure)
 ```
 
-Switch between prod and test by changing `DB_DIR` in `.env`. Both sets are fully independent.
+Set `DB_DIR` for prod and `TEST_DB_DIR` for test in `.env`. `python -m sandy --test` swaps to `TEST_DB_DIR` before the bot imports, and both sets remain fully independent.
 
 ## Creating a Discord bot
 

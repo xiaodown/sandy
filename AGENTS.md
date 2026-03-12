@@ -87,7 +87,8 @@ Key env vars:
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `DISCORD_API_KEY` | Bot token | — (required) |
-| `DB_DIR` | Database directory | `data/prod/` |
+| `DB_DIR` | Production database directory | `data/prod/` |
+| `TEST_DB_DIR` | Test database directory used by `--test` | `data/test/` |
 | `BRAIN_MODEL` | Main personality model | `qwen2.5:14b` |
 | `BOUNCER_MODEL` | Decision engine model | `qwen2.5:14b` |
 | `TAGGER_MODEL` | Tag generation model | `qwen2.5:14b` |
@@ -122,7 +123,7 @@ data/
 └── test/           # test (same structure, independent data)
 ```
 
-Switch between prod and test by changing `DB_DIR` in `.env`. All three databases (recall, server, chroma) follow the same `DB_DIR`.
+Set `DB_DIR` for prod and `TEST_DB_DIR` for test in `.env`. `python -m sandy --test` swaps `DB_DIR` to `TEST_DB_DIR` before importing the bot. All three databases (recall, server, chroma) follow the active `DB_DIR`.
 
 ### Recall database schema (v3)
 
@@ -205,6 +206,13 @@ There is also a Pydantic `model_validator` on `BouncerResponse` that forces `use
   - embed for vector storage
 - The embed model (`mxbai-embed-large`) is a separate ollama runner and will continue to appear as a small single-GPU load. That is expected.
 - The current "same big model for brain/bouncer/tagger/summarizer/vision" setup is intentionally suboptimal and was originally a desktop-VRAM compromise. On the homelab box, revisiting role-specific models is now practical.
+
+### Reply handling and background work
+
+- As of 2026-03-12, Sandy splits overlong brain replies into multiple Discord messages before send. Do not assume one `channel.send()` is always safe.
+- Message persistence is no longer tied to reply delivery. Incoming messages are queued for memory processing before the reply send path, so a Discord send failure does not skip Recall/RAG storage for the triggering user message.
+- Background memory processing now runs behind a single in-process queue/worker owned by `bot.py`. It is still deferred work, but it is no longer an unsupervised `asyncio.create_task(...)` fire-and-forget path.
+- Brain responses now log Ollama's `done_reason`. If you see `done_reason=length`, the model hit `num_predict`; that is a generation-cap issue, not a Discord send-limit issue.
 
 ## Conventions
 

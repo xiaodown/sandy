@@ -18,6 +18,8 @@ import asyncio
 import io
 import os
 import logging
+import re
+from collections.abc import Awaitable
 
 import discord
 from dotenv import load_dotenv
@@ -65,6 +67,7 @@ memory = MemoryClient(db=recall_db, llm=llm, vector_memory=vector_memory)
 
 # Guard so cache seeding only runs once, even if on_ready fires on reconnect.
 _cache_seeded = False
+_memory_worker_task: asyncio.Task | None = None
 
 # ---------------------------------------------------------------------------
 # Image attachment handling
@@ -83,6 +86,9 @@ _VISION_CONTENT_TYPES: frozenset[str] = frozenset({
 # Skip files over this size — avoids downloading huge uploads on slow connections.
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20 MB
 
+# Discord hard-caps message content at 2000 chars.
+_DISCORD_MESSAGE_LIMIT = 2000
+
 # ---------------------------------------------------------------------------
 # Tool result framing for brain injection
 # ---------------------------------------------------------------------------
@@ -90,6 +96,82 @@ _MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20 MB
 _MEMORY_TOOLS: frozenset[str] = frozenset({
     "recall_recent", "recall_from_user", "recall_by_topic", "search_memories",
 })
+
+
+class BackgroundTaskSupervisor:
+    """Track background tasks so failures are logged and shutdown is orderly."""
+
+    def __init__(self) -> None:
+        self._tasks: set[asyncio.Task] = set()
+
+    def create_task(self, coro: Awaitable[object], *, name: str) -> asyncio.Task:
+        task = asyncio.create_task(coro, name=name)
+        self._tasks.add(task)
+        task.add_done_callback(self._on_done)
+        return task
+
+    def _on_done(self, task: asyncio.Task) -> None:
+        self._tasks.discard(task)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.info("Background task cancelled: %s", task.get_name())
+        except Exception:
+            logger.exception("Background task failed: %s", task.get_name())
+
+    async def shutdown(self) -> None:
+        if not self._tasks:
+            return
+
+        pending = tuple(self._tasks)
+        logger.info("Waiting for %d background task(s) to finish", len(pending))
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+class MemoryWorker:
+    """Serialize deferred memory work behind a small in-process queue."""
+
+    _SENTINEL = object()
+
+    def __init__(self, handler) -> None:
+        self._handler = handler
+        self._queue: asyncio.Queue[object] = asyncio.Queue()
+        self._closed = False
+
+    async def run(self) -> None:
+        logger.info("Memory worker started")
+        while True:
+            item = await self._queue.get()
+            try:
+                if item is self._SENTINEL:
+                    logger.info("Memory worker stopping")
+                    return
+
+                message, image_descriptions = item
+                await self._handler(message, image_descriptions=image_descriptions)
+            finally:
+                self._queue.task_done()
+
+    async def enqueue(
+        self,
+        message: discord.Message,
+        image_descriptions: list[str] | None = None,
+    ) -> None:
+        if self._closed:
+            raise RuntimeError("Memory worker is closed")
+        await self._queue.put((message, image_descriptions))
+
+    async def shutdown(self) -> None:
+        if self._closed:
+            return
+
+        self._closed = True
+        await self._queue.join()
+        await self._queue.put(self._SENTINEL)
+
+
+background_tasks = BackgroundTaskSupervisor()
+memory_worker = MemoryWorker(memory.process_and_store)
 
 
 def _format_tool_context(tool_name: str, result: str) -> str:
@@ -108,6 +190,148 @@ def _format_tool_context(tool_name: str, result: str) -> str:
         return f"## You just recalled this from memory\n{result}"
     else:
         return f"## Additional context\n{result}"
+
+
+def _split_reply(reply: str, limit: int = _DISCORD_MESSAGE_LIMIT) -> list[str]:
+    """Split a reply into Discord-sized chunks, preferring natural boundaries."""
+    if len(reply) <= limit:
+        return [reply]
+
+    chunks: list[str] = []
+    remaining = reply.strip()
+
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+
+        split_at = remaining.rfind("\n\n", 0, limit + 1)
+        if split_at == -1:
+            split_at = remaining.rfind("\n", 0, limit + 1)
+        if split_at == -1:
+            split_at = remaining.rfind(" ", 0, limit + 1)
+        if split_at == -1 or split_at < limit // 2:
+            split_at = limit
+
+        chunk = remaining[:split_at].strip()
+        if not chunk:
+            chunk = remaining[:limit]
+            split_at = limit
+
+        chunks.append(chunk)
+        remaining = remaining[split_at:].lstrip()
+
+    return chunks
+
+
+def _trim_to_last_boundary(reply: str) -> str:
+    """Trim a reply back to the last strong sentence or paragraph boundary."""
+    sentence_matches = list(re.finditer(r'[.!?]["\')\]]?(?:\s|$)', reply))
+    if sentence_matches:
+        cut = sentence_matches[-1].end()
+        trimmed = reply[:cut].strip()
+        if trimmed:
+            return trimmed
+
+    split_at = reply.rfind("\n\n")
+    if split_at != -1:
+        trimmed = reply[:split_at].strip()
+        if trimmed:
+            return trimmed
+
+    split_at = reply.rfind("\n")
+    if split_at != -1:
+        trimmed = reply[:split_at].strip()
+        if trimmed:
+            return trimmed
+
+    return reply.strip()
+
+
+def _trim_truncated_reply(reply: str) -> str:
+    """Trim a likely-truncated reply back to a clearly complete stopping point."""
+    paragraph_matches = list(re.finditer(r"\n\s*\n", reply))
+    sentence_matches = list(re.finditer(r'[.!?]["\')\]]?(?:\s|$)', reply))
+
+    if paragraph_matches:
+        paragraph_cut = paragraph_matches[-1].start()
+        trimmed = reply[:paragraph_cut].strip()
+        if trimmed and len(trimmed) >= max(80, len(reply) // 3):
+            return trimmed
+
+    if sentence_matches:
+        sentence_cut = sentence_matches[-1].end()
+        trimmed = reply[:sentence_cut].strip()
+        if trimmed and len(trimmed) >= max(80, len(reply) // 3):
+            return trimmed
+
+    return _trim_to_last_boundary(reply)
+
+
+def _looks_truncated(reply: str, done_reason: str | None = None) -> bool:
+    """Heuristic for obvious generation cutoffs."""
+    text = reply.rstrip()
+    if not text:
+        return False
+
+    if done_reason == "length":
+        return True
+
+    if text[-1] in ".!?\"')]}":
+        return False
+
+    if text[-1] in ",:;/-([{":
+        return True
+
+    last_word_match = re.search(r"([A-Za-z']+)\s*$", text)
+    last_word = last_word_match.group(1).lower() if last_word_match else ""
+    if last_word in {
+        "a", "an", "and", "are", "as", "at", "but", "for", "from",
+        "i", "if", "in", "is", "it", "like", "my", "of", "on", "or",
+        "so", "that", "the", "to", "was", "with", "you", "your",
+    }:
+        return True
+
+    return len(last_word) <= 2
+
+
+def _finalize_reply(reply: str | None, *, done_reason: str | None = None) -> str | None:
+    """Normalize reply text and trim obvious model cutoffs to a clean boundary."""
+    if reply is None:
+        return None
+
+    cleaned = reply.strip()
+    if not cleaned:
+        return None
+
+    if not _looks_truncated(cleaned, done_reason=done_reason):
+        return cleaned
+
+    trimmed = _trim_truncated_reply(cleaned)
+    if trimmed and trimmed != cleaned:
+        logger.warning(
+            "Brain reply looked truncated; trimmed from %d to %d chars",
+            len(cleaned),
+            len(trimmed),
+        )
+        return trimmed
+
+    return cleaned
+
+
+async def _send_reply(message: discord.Message, reply: str) -> int:
+    """Send a reply, splitting into multiple Discord messages if needed."""
+    parts = _split_reply(reply)
+    if len(parts) > 1:
+        logger.warning(
+            "Reply exceeded Discord limit (%d chars) - sending %d chunks",
+            len(reply),
+            len(parts),
+        )
+
+    for part in parts:
+        await message.channel.send(part)
+    return len(parts)
 
 
 async def _describe_attachments(message: discord.Message) -> list[str]:
@@ -193,9 +417,14 @@ def _build_augmented_content(message: discord.Message, descriptions: list[str]) 
 @bot.event
 async def on_ready():
     """Event handler for when the bot is ready."""
-    global _cache_seeded
+    global _cache_seeded, _memory_worker_task
 
     logger.info("Logged in as %s (%s)", bot.user.name, bot.user.id)
+    if _memory_worker_task is None or _memory_worker_task.done():
+        _memory_worker_task = background_tasks.create_task(
+            memory_worker.run(),
+            name="memory-worker",
+        )
     if not _cache_seeded:
         seeded = await memory.seed_cache(cache)
         logger.info("Cache seeded with %d message(s) from Recall", seeded)
@@ -221,7 +450,10 @@ async def on_message(message: discord.Message):
     # Update the registry (server / channel / user lookup cache)
     # Note: bot's own messages are included — they're part of the conversation context
     # registry.ensure_seen() uses sqlite3 (blocking I/O), so run it in a thread.
-    asyncio.create_task(asyncio.to_thread(registry.ensure_seen, message))
+    background_tasks.create_task(
+        asyncio.to_thread(registry.ensure_seen, message),
+        name=f"registry.ensure_seen:{message.id}",
+    )
 
     logger.info(
         "[%s/%s] %s%s: %s",
@@ -235,7 +467,7 @@ async def on_message(message: discord.Message):
         # so they appear in conversation history, but skip bouncer/brain entirely.
         logger.debug("Bot message from %s — storing and skipping pipeline", message.author.display_name)
         cache.add(message)
-        asyncio.create_task(memory.process_and_store(message))
+        await memory_worker.enqueue(message)
         return
 
     # --- Image attachment processing -----------------------------------
@@ -277,6 +509,8 @@ async def on_message(message: discord.Message):
         bouncer_result.use_tool,
     )
 
+    await memory_worker.enqueue(message, image_descriptions=image_descriptions)
+
     if bouncer_result.should_respond:
         # Show "Sandy is typing..." for the entire duration of tool call +
         # LLM generation.  channel.typing() is an async context manager that
@@ -314,7 +548,7 @@ async def on_message(message: discord.Message):
             )
 
             # --- Brain response ----------------------------------------
-            reply = await llm.ask_brain(
+            brain_response = await llm.ask_brain(
                 ollama_history,
                 bot_name=bot.user.display_name,
                 server_name=message.guild.name,
@@ -322,19 +556,34 @@ async def on_message(message: discord.Message):
                 rag_context=rag_context,
                 tool_context=tool_context,
             )
+            reply = _finalize_reply(
+                brain_response.content if brain_response else None,
+                done_reason=brain_response.done_reason if brain_response else None,
+            )
 
             if reply:
-                await message.channel.send(reply)
-                logger.info("Brain replied in %s/%s (%d chars)",
-                            message.guild.name, message.channel.name, len(reply))
+                try:
+                    sent_parts = await _send_reply(message, reply)
+                    logger.info(
+                        "Brain replied in %s/%s (%d chars, %d message(s), done_reason=%s)",
+                        message.guild.name,
+                        message.channel.name,
+                        len(reply),
+                        sent_parts,
+                        brain_response.done_reason if brain_response else None,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Reply send failed in %s/%s after generation",
+                        message.guild.name,
+                        message.channel.name,
+                    )
             else:
                 logger.warning("Brain returned None for message in %s/%s — not sending",
                                message.guild.name, message.channel.name)
 
-    # --- Memory (fire-and-forget after pipeline) -----------------------
-    # Now that the LLM is free, tag and store the message in the background.
-    # process_and_store will await the lock, so if another message's pipeline
-    # fires concurrently the tagger/summarizer will queue behind it cleanly.
-    # Pass image_descriptions so Recall and RAG store the description text
-    # rather than an empty content field.
-    asyncio.create_task(memory.process_and_store(message, image_descriptions=image_descriptions))
+
+async def shutdown_background_work() -> None:
+    """Flush queued background work before process exit."""
+    await memory_worker.shutdown()
+    await background_tasks.shutdown()
