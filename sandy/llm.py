@@ -24,6 +24,7 @@ into the brain's context before asking it to respond.
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import ollama
@@ -131,6 +132,15 @@ class TaggerResponse(BaseModel):
 class SummarizerResponse(BaseModel):
     """Structured output for the Summarizer role."""
     summary: str
+
+
+@dataclass
+class BrainResponse:
+    """Brain generation result plus completion metadata from Ollama."""
+
+    content: str
+    done_reason: str | None = None
+    eval_count: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +400,7 @@ class OllamaInterface:
         channel_name: str = "general",
         rag_context: Optional[str] = None,
         tool_context: Optional[str] = None,
-    ) -> Optional[str]:
+    ) -> Optional[BrainResponse]:
         """Generate a response from the Brain model.
 
         messages     — multi-turn history from ChannelHistory.to_ollama_messages().
@@ -406,7 +416,7 @@ class OllamaInterface:
                        Injected into the system prompt so Sandy can reference the
                        information naturally in her response.
 
-        Returns the response text, or None on error.
+        Returns the response text plus completion metadata, or None on error.
         """
         prompt = SandyPrompt.brain_prompt(
             bot_name=bot_name,
@@ -444,7 +454,11 @@ class OllamaInterface:
                         "num_ctx":     _BRAIN_NUM_CTX,
                     },
                 )
-            return response.message.content
+            return BrainResponse(
+                content=response.message.content or "",
+                done_reason=response.done_reason,
+                eval_count=response.eval_count,
+            )
         except Exception as exc:
             logger.error("Brain error: %s", exc)
             return None
