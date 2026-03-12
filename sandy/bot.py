@@ -19,6 +19,7 @@ import io
 import os
 import logging
 import re
+import time
 from collections.abc import Awaitable
 
 import discord
@@ -31,6 +32,7 @@ from .registry import Registry
 from .last10 import Last10, resolve_mentions, SyntheticMessage, _SyntheticAuthor, _SyntheticGuild, _SyntheticChannel
 from .memory import MemoryClient
 from .llm import OllamaInterface
+from .trace import TurnTrace, event_payload
 from .vector_memory import VectorMemory
 from . import tools
 
@@ -190,6 +192,25 @@ def _format_tool_context(tool_name: str, result: str) -> str:
         return f"## You just recalled this from memory\n{result}"
     else:
         return f"## Additional context\n{result}"
+
+
+def _trace_event(
+    trace: TurnTrace,
+    stage: str,
+    *,
+    status: str = "ok",
+    duration_ms: int | None = None,
+    **fields: object,
+) -> None:
+    """Emit one structured trace event into the normal logs."""
+    payload = event_payload(
+        trace,
+        stage,
+        status=status,
+        duration_ms=duration_ms,
+        **fields,
+    )
+    logger.info("TRACE %s", payload)
 
 
 def _split_reply(reply: str, limit: int = _DISCORD_MESSAGE_LIMIT) -> list[str]:
@@ -447,6 +468,16 @@ async def on_message(message: discord.Message):
     if message.guild is None:
         return
 
+    trace = TurnTrace.from_message(message)
+    turn_started = time.perf_counter()
+    _trace_event(
+        trace,
+        "message_received",
+        content_chars=len(message.content or ""),
+        attachments=len(message.attachments),
+        author_is_bot=message.author.bot,
+    )
+
     # Update the registry (server / channel / user lookup cache)
     # Note: bot's own messages are included — they're part of the conversation context
     # registry.ensure_seen() uses sqlite3 (blocking I/O), so run it in a thread.
@@ -468,6 +499,14 @@ async def on_message(message: discord.Message):
         logger.debug("Bot message from %s — storing and skipping pipeline", message.author.display_name)
         cache.add(message)
         await memory_worker.enqueue(message)
+        _trace_event(trace, "memory_enqueued", source="bot_message")
+        _trace_event(
+            trace,
+            "turn_completed",
+            duration_ms=int((time.perf_counter() - turn_started) * 1000),
+            replied=False,
+            bot_message=True,
+        )
         return
 
     # --- Image attachment processing -----------------------------------
@@ -475,7 +514,14 @@ async def on_message(message: discord.Message):
     # bouncer and brain both see the image content in context.
     # The original message is always passed to process_and_store — Recall
     # stores what was actually said, not our augmented version.
+    vision_started = time.perf_counter()
     image_descriptions = await _describe_attachments(message)
+    _trace_event(
+        trace,
+        "vision_completed",
+        duration_ms=int((time.perf_counter() - vision_started) * 1000),
+        image_count=len(image_descriptions),
+    )
     if image_descriptions:
         augmented_content = _build_augmented_content(message, image_descriptions)
         cache_message = SyntheticMessage(
@@ -500,6 +546,7 @@ async def on_message(message: discord.Message):
 
     # --- Bouncer decision (respond + tool) ----------------------------
     history = cache.get(message.guild.id, message.channel.id)
+    bouncer_started = time.perf_counter()
     bouncer_result = await llm.ask_bouncer(history.format(), bot_name=bot.user.display_name)
 
     logger.info(
@@ -508,8 +555,17 @@ async def on_message(message: discord.Message):
         bouncer_result.recommended_tool or "none",
         bouncer_result.use_tool,
     )
+    _trace_event(
+        trace,
+        "bouncer_completed",
+        duration_ms=int((time.perf_counter() - bouncer_started) * 1000),
+        should_respond=bouncer_result.should_respond,
+        use_tool=bouncer_result.use_tool,
+        tool_name=bouncer_result.recommended_tool,
+    )
 
     await memory_worker.enqueue(message, image_descriptions=image_descriptions)
+    _trace_event(trace, "memory_enqueued", source="user_message")
 
     if bouncer_result.should_respond:
         # Show "Sandy is typing..." for the entire duration of tool call +
@@ -524,11 +580,23 @@ async def on_message(message: discord.Message):
                         "Bouncer recommended unknown tool %r — ignoring",
                         bouncer_result.recommended_tool,
                     )
+                    _trace_event(
+                        trace,
+                        "tool_completed",
+                        status="ignored",
+                        tool_name=bouncer_result.recommended_tool,
+                    )
                 else:
                     logger.info(
                         "Dispatching tool %s with params %s",
                         bouncer_result.recommended_tool,
                         bouncer_result.tool_parameters or {},
+                    )
+                    tool_started = time.perf_counter()
+                    _trace_event(
+                        trace,
+                        "tool_started",
+                        tool_name=bouncer_result.recommended_tool,
                     )
                     tool_result = await tools.dispatch(
                         bouncer_result.recommended_tool,
@@ -536,18 +604,33 @@ async def on_message(message: discord.Message):
                         server_id=message.guild.id,
                         server_name=message.guild.name,
                     )
+                    _trace_event(
+                        trace,
+                        "tool_completed",
+                        duration_ms=int((time.perf_counter() - tool_started) * 1000),
+                        tool_name=bouncer_result.recommended_tool,
+                        result_chars=len(tool_result or ""),
+                    )
                     tool_context = _format_tool_context(
                         bouncer_result.recommended_tool, tool_result,
                     )
 
             # --- RAG query ---------------------------------------------
             ollama_history = history.to_ollama_messages(bot.user.id)
+            retrieval_started = time.perf_counter()
             rag_context = await vector_memory.query(
                 rag_query_text,
                 server_id=message.guild.id,
             )
+            _trace_event(
+                trace,
+                "retrieval_completed",
+                duration_ms=int((time.perf_counter() - retrieval_started) * 1000),
+                context_chars=len(rag_context or ""),
+            )
 
             # --- Brain response ----------------------------------------
+            brain_started = time.perf_counter()
             brain_response = await llm.ask_brain(
                 ollama_history,
                 bot_name=bot.user.display_name,
@@ -556,6 +639,13 @@ async def on_message(message: discord.Message):
                 rag_context=rag_context,
                 tool_context=tool_context,
             )
+            _trace_event(
+                trace,
+                "brain_completed",
+                duration_ms=int((time.perf_counter() - brain_started) * 1000),
+                done_reason=brain_response.done_reason if brain_response else None,
+                reply_chars=len((brain_response.content if brain_response else "") or ""),
+            )
             reply = _finalize_reply(
                 brain_response.content if brain_response else None,
                 done_reason=brain_response.done_reason if brain_response else None,
@@ -563,7 +653,16 @@ async def on_message(message: discord.Message):
 
             if reply:
                 try:
+                    send_started = time.perf_counter()
+                    _trace_event(trace, "reply_send_started", reply_chars=len(reply))
                     sent_parts = await _send_reply(message, reply)
+                    _trace_event(
+                        trace,
+                        "reply_send_completed",
+                        duration_ms=int((time.perf_counter() - send_started) * 1000),
+                        reply_chars=len(reply),
+                        message_parts=sent_parts,
+                    )
                     logger.info(
                         "Brain replied in %s/%s (%d chars, %d message(s), done_reason=%s)",
                         message.guild.name,
@@ -573,14 +672,23 @@ async def on_message(message: discord.Message):
                         brain_response.done_reason if brain_response else None,
                     )
                 except Exception:
+                    _trace_event(trace, "reply_send_completed", status="error")
                     logger.exception(
                         "Reply send failed in %s/%s after generation",
                         message.guild.name,
                         message.channel.name,
                     )
             else:
+                _trace_event(trace, "reply_skipped", status="empty_reply")
                 logger.warning("Brain returned None for message in %s/%s — not sending",
                                message.guild.name, message.channel.name)
+
+    _trace_event(
+        trace,
+        "turn_completed",
+        duration_ms=int((time.perf_counter() - turn_started) * 1000),
+        replied=bouncer_result.should_respond,
+    )
 
 
 async def shutdown_background_work() -> None:
