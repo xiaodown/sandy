@@ -72,6 +72,7 @@ The `.env` is well-commented and broken into sections. The important bits:
 - `TEST_DB_DIR` — database directory used automatically by `python -m sandy --test`
 - `BRAIN_MODEL`, `BOUNCER_MODEL`, etc. — ollama model tags. All roles can use the same model to avoid VRAM thrashing
 - `EMBED_MODEL` — embedding model for ChromaDB (default: `mxbai-embed-large`)
+- `OLLAMA_KEEP_ALIVE` — how long ollama keeps a model in VRAM after the last request. `30m` is a reasonable homelab default if you care about idle GPU power draw.
 
 ### 3. Install and pull models
 
