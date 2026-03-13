@@ -248,11 +248,20 @@ Respond only with a JSON object matching the required schema."""
         system = (
             "You are an image analysis system. "
             "Your sole function is to describe images accurately and completely. "
-            "Describe what you observe: subjects, objects, any visible text, colors, "
-            "composition, setting, mood, and any notable details. "
-            "Be thorough but not verbose. "
+            "Describe what you observe: people, creatures, objects, clothing, actions, "
+            "facial expressions, visible text, colors, lighting, composition, setting, "
+            "art style or photo style, and any notable small details that matter. "
+            "Write a grounded description rich enough that a separate language model "
+            "can react as if it actually saw the image. "
+            "If any detail is unclear, say that it appears or seems to be present rather "
+            "than pretending certainty. "
+            "Be detailed and concrete, but do not ramble. "
             "Output only a plain factual description — no personality, no opinions, "
             "no editorial commentary, no emotional response."
         )
-        user = "Describe this image."
+        user = (
+            "Describe this image in enough detail for a chatbot to understand what is "
+            "happening, what stands out visually, and what text or small details might "
+            "matter."
+        )
         return OllamaPrompt(system=system, user=user)

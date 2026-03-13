@@ -70,9 +70,10 @@ The `.env` is well-commented and broken into sections. The important bits:
 - `DISCORD_API_KEY` — your bot token (see [Creating a Discord bot](#creating-a-discord-bot) below)
 - `DB_DIR` — production database directory
 - `TEST_DB_DIR` — database directory used automatically by `python -m sandy --test`
-- `BRAIN_MODEL`, `BOUNCER_MODEL`, etc. — ollama model tags. All roles can use the same model to avoid VRAM thrashing
+- `BRAIN_MODEL`, `BOUNCER_MODEL`, etc. — ollama model tags. Roles can share a model, but splitting them is often better once VRAM behavior is understood.
 - `EMBED_MODEL` — embedding model for ChromaDB (default: `mxbai-embed-large`)
 - `OLLAMA_KEEP_ALIVE` — how long ollama keeps a model in VRAM after the last request. `30m` is a reasonable homelab default if you care about idle GPU power draw.
+- If multiple roles share one model tag, keep their `*_NUM_CTX` values aligned unless you want Ollama to spin up separate runners for the same model.
 
 ### 3. Install and pull models
 
