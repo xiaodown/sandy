@@ -70,11 +70,11 @@ _PREWARM_NUM_CTX   = int(os.getenv("PREWARM_NUM_CTX", str(_BOUNCER_NUM_CTX)))
 _VISION_MODEL = os.getenv("VISION_MODEL", None)  # resolved below after _BRAIN_MODEL is set
 
 # How long ollama keeps a model loaded in VRAM after the last request.
-# Ollama default is 5 minutes — far too short for a chat bot that may go quiet
-# for stretches. Set to "1h", "2h", or -1 to keep loaded indefinitely.
-# Particularly important on multi-GPU machines with slow PCIe slots where
-# reloading weights across the bus adds noticeable latency.
-_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "1h")
+# Sandy now defaults to 30 minutes instead of a long residency because keeping
+# large models hot can hold an otherwise-idle GPU at a much higher power draw.
+# Set to "15m", "30m", "1h", etc. depending on your latency vs. power tradeoff,
+# or -1 only if you intentionally want the model pinned in VRAM indefinitely.
+_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
 
 # Bouncer, tagger, and summarizer use low temperatures for consistent
 # structured output.  The brain temperature is intentionally higher for
