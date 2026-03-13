@@ -104,7 +104,7 @@ Key env vars:
 | `VISION_NUM_CTX` | Vision context window size | `8192` |
 | `VISION_NUM_PREDICT` | Vision output token cap | `384` |
 | `PREWARM_NUM_CTX` | Prewarm context window size | `BOUNCER_NUM_CTX` |
-| `OLLAMA_KEEP_ALIVE` | VRAM model retention | `30m` |
+| `OLLAMA_KEEP_ALIVE` | VRAM model retention | `1h` |
 | `SUMMARIZE_THRESHOLD` | Chars before summarizing | `450` |
 | `SERVER_DB_NAME` | Registry DB filename | `server.db` |
 | `RECALL_DB_NAME` | Recall DB filename | `recall.db` |
@@ -193,7 +193,7 @@ There is also a Pydantic `model_validator` on `BouncerResponse` that forces `use
 ### Prewarm behavior
 
 - `warm_model()` is async now and uses the shared `AsyncClient`, the shared `asyncio.Lock`, explicit `keep_alive`, and explicit `PREWARM_NUM_CTX`.
-- As of 2026-03-13, the default `OLLAMA_KEEP_ALIVE` is `30m` instead of `1h` so Sandy does not keep a big model idling in VRAM all evening unless you explicitly choose that tradeoff.
+- On 2026-03-13, a temporary `30m` keep-alive experiment showed that unloading after idle freed VRAM but did not materially reduce settled idle GPU power draw on this box, while cold-start latency got noticeably worse. Default back to `1h` unless VRAM reclamation matters more than responsiveness.
 - Prewarming now happens in `__main__.py` before `bot.start(...)`, not inside `on_ready()`. This avoids blocking Discord startup callbacks on model loading.
 - If you ever see a fresh `POST /api/generate` followed by a giant-context warning in the ollama logs again, assume the prewarm path regressed first.
 
