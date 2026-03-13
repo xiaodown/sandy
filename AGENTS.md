@@ -102,6 +102,7 @@ Key env vars:
 | `TAGGER_NUM_CTX` | Tagger context window size | `4096` |
 | `SUMMARIZER_NUM_CTX` | Summarizer context window size | `4096` |
 | `VISION_NUM_CTX` | Vision context window size | `8192` |
+| `VISION_NUM_PREDICT` | Vision output token cap | `384` |
 | `PREWARM_NUM_CTX` | Prewarm context window size | `BOUNCER_NUM_CTX` |
 | `OLLAMA_KEEP_ALIVE` | VRAM model retention | `30m` |
 | `SUMMARIZE_THRESHOLD` | Chars before summarizing | `450` |
@@ -207,6 +208,7 @@ There is also a Pydantic `model_validator` on `BouncerResponse` that forces `use
   - embed for vector storage
 - The embed model (`mxbai-embed-large`) is a separate ollama runner and will continue to appear as a small single-GPU load. That is expected.
 - The current "same big model for brain/bouncer/tagger/summarizer/vision" setup is intentionally suboptimal and was originally a desktop-VRAM compromise. On the homelab box, revisiting role-specific models is now practical.
+- Current recommended local split: keep the larger conversational model for `BRAIN_MODEL`, share a smaller instruct model across `BOUNCER_MODEL` / `TAGGER_MODEL` / `SUMMARIZER_MODEL`, and use a dedicated `VISION_MODEL` for attachment descriptions.
 
 ### Reply handling and background work
 

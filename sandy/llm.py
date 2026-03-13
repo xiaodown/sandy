@@ -62,6 +62,7 @@ _BOUNCER_NUM_CTX   = int(os.getenv("BOUNCER_NUM_CTX", "8192"))
 _TAGGER_NUM_CTX    = int(os.getenv("TAGGER_NUM_CTX", "4096"))
 _SUMMARIZER_NUM_CTX = int(os.getenv("SUMMARIZER_NUM_CTX", "4096"))
 _VISION_NUM_CTX    = int(os.getenv("VISION_NUM_CTX", "8192"))
+_VISION_NUM_PREDICT = int(os.getenv("VISION_NUM_PREDICT", "384"))
 _PREWARM_NUM_CTX   = int(os.getenv("PREWARM_NUM_CTX", str(_BOUNCER_NUM_CTX)))
 
 # Vision model — describes image attachments. Defaults to brain model so no extra
@@ -238,7 +239,10 @@ class OllamaInterface:
                         {"role": "user",   "content": prompt.user, "images": [image_bytes]},
                     ],
                     keep_alive=_KEEP_ALIVE,
-                    options={"num_ctx": _VISION_NUM_CTX},
+                    options={
+                        "num_ctx": _VISION_NUM_CTX,
+                        "num_predict": _VISION_NUM_PREDICT,
+                    },
                 )
             desc = (response.message.content or "").strip()
             logger.debug("Vision → %d chars", len(desc))
