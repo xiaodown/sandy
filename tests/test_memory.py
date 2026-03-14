@@ -94,9 +94,8 @@ async def test_store_message_returns_false_when_db_insert_fails():
     db = SimpleNamespace(create_message=lambda message: (_ for _ in ()).throw(RuntimeError("db down")))
     client = MemoryClient(db=db)
 
-    result = await client.store_message(make_message())
-
-    assert result is False
+    with pytest.raises(RuntimeError, match="db down"):
+        await client.store_message(make_message())
 
 
 @pytest.mark.asyncio
@@ -237,7 +236,7 @@ async def test_process_and_store_continues_to_vector_when_recall_store_fails():
 
 
 @pytest.mark.asyncio
-async def test_process_and_store_raises_after_recall_success_if_vector_insert_fails():
+async def test_process_and_store_raises_after_vector_failure_even_if_recall_succeeds():
     created_messages = []
     db = SimpleNamespace(create_message=lambda message: created_messages.append(message))
     vector_memory = SimpleNamespace(add_message=AsyncMock(side_effect=RuntimeError("vector down")))
@@ -247,6 +246,16 @@ async def test_process_and_store_raises_after_recall_success_if_vector_insert_fa
         await client.process_and_store(make_message(content="store then explode"))
 
     assert len(created_messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_process_and_store_raises_if_both_vector_and_recall_fail():
+    db = SimpleNamespace(create_message=lambda message: (_ for _ in ()).throw(RuntimeError("recall down")))
+    vector_memory = SimpleNamespace(add_message=AsyncMock(side_effect=RuntimeError("vector down")))
+    client = MemoryClient(db=db, vector_memory=vector_memory)
+
+    with pytest.raises(RuntimeError, match="vector down"):
+        await client.process_and_store(make_message(content="lose both"))
 
 
 @pytest.mark.asyncio
