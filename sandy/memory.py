@@ -88,21 +88,10 @@ class MemoryClient:
         """
         tags: list[str] = []
         summary: Optional[str] = None
-
-        # Build the content string we'll actually store and embed.
-        # For image messages: append description(s) so Recall and RAG contain
-        # the image context rather than an empty or text-only string.
-        # We never store raw image bytes — descriptions are the memory.
-        content_for_storage = message.content or ""
-        if image_descriptions:
-            img_block = "  ".join(
-                f"[Image {i}: {d}]" if len(image_descriptions) > 1 else f"[Image: {d}]"
-                for i, d in enumerate(image_descriptions, 1)
-            )
-            content_for_storage = (
-                f"{content_for_storage}  {img_block}".strip()
-                if content_for_storage else img_block
-            )
+        content_for_storage = self._build_content_for_storage(
+            message,
+            image_descriptions=image_descriptions,
+        )
 
         if self._llm is not None and content_for_storage:
             try:
@@ -132,43 +121,62 @@ class MemoryClient:
                     )
                     summary = None
 
-        stored = self._store(message, tags=tags or None, summary=summary, content_override=content_for_storage or None)
+        recall_stored = False
+        vector_stored = False
+        vector_error: Exception | None = None
 
-        # Embed and store in the vector memory for semantic RAG retrieval.
-        # message.id is always a real Discord snowflake here — process_and_store
-        # is only ever called with genuine discord.Message objects.
-        if self._vector_memory is not None and content_for_storage:
-            await self._vector_memory.add_message(
-                message_id  = str(message.id),
-                content     = content_for_storage,
-                author_name = message.author.display_name,
-                server_id   = message.guild.id,
-                timestamp   = message.created_at,
+        try:
+            vector_stored = await self._store_vector(
+                message,
+                content=content_for_storage,
             )
-            logger.info(
-                "Sent message to RAG from %s in %s/%s", 
-                message.author.display_name,
+        except Exception as exc:
+            vector_error = exc
+            logger.error(
+                "Vector store failed for message %s in %s/%s: %s",
+                message.id,
                 message.guild.name,
-                message.channel.name
+                message.channel.name,
+                exc,
+            )
+
+        try:
+            recall_stored = self._store_recall(
+                message,
+                tags=tags or None,
+                summary=summary,
+                content_override=content_for_storage or None,
+            )
+        except Exception as exc:
+            logger.error(
+                "Recall store failed for message %s in %s/%s: %s",
+                message.id,
+                message.guild.name,
+                message.channel.name,
+                exc,
             )
 
         logger.info(
-            "Stored message from %s in %s/%s — tags=%r summary=%s stored=%s",
+            "Stored message from %s in %s/%s — tags=%r summary=%s vector=%s recall=%s",
             message.author.display_name,
             message.guild.name,
             message.channel.name,
             tags,
             "yes" if summary else "no",
-            stored,
+            vector_stored,
+            recall_stored,
         )
+
+        if vector_error is not None:
+            raise vector_error
 
     async def store_message(self, message: discord.Message) -> bool:
         """Store a Discord message in Recall without any tags or LLM processing.
 
         Use process_and_store() for the full tag+summarize+store pipeline.
-        Returns True on success, False on any error.
+        Returns True on success. Raises on any store error.
         """
-        return self._store(message, tags=None, summary=None)
+        return self._store_recall(message, tags=None, summary=None)
 
     async def store_message_with_tags(
         self,
@@ -181,7 +189,7 @@ class MemoryClient:
         tags     — list of normalized lowercase strings, e.g. ["game", "tarkov"]
         summary  — optional one-line LLM summary of the message
         """
-        return self._store(message, tags=tags, summary=summary)
+        return self._store_recall(message, tags=tags, summary=summary)
 
     async def seed_cache(self, cache: "Last10", hours: int = 24) -> int:
         """Seed the in-memory rolling cache from Recall on bot startup.
@@ -253,7 +261,26 @@ class MemoryClient:
     # Internal
     # ------------------------------------------------------------------
 
-    def _store(
+    def _build_content_for_storage(
+        self,
+        message: discord.Message,
+        *,
+        image_descriptions: Optional[list[str]] = None,
+    ) -> str:
+        """Build the content string used for both Recall storage and RAG."""
+        content_for_storage = message.content or ""
+        if image_descriptions:
+            img_block = "  ".join(
+                f"[Image {i}: {d}]" if len(image_descriptions) > 1 else f"[Image: {d}]"
+                for i, d in enumerate(image_descriptions, 1)
+            )
+            content_for_storage = (
+                f"{content_for_storage}  {img_block}".strip()
+                if content_for_storage else img_block
+            )
+        return content_for_storage
+
+    def _store_recall(
         self,
         message: discord.Message,
         tags: Optional[list[str]],
@@ -266,7 +293,7 @@ class MemoryClient:
         message.content.  Used for image messages where we want the description,
         not an empty string, in Recall.
 
-        Returns True on success, False on any error.
+        Returns True on success. Raises on failure so the caller can decide policy.
         """
         msg = ChatMessageCreate(
             author_id=message.author.id,
@@ -280,13 +307,30 @@ class MemoryClient:
             tags=tags,
             summary=summary,
         )
-        try:
-            self._db.create_message(msg)
-            return True
-        except Exception as exc:
-            logger.error(
-                "Recall store failed for message in channel %s: %s",
-                message.channel.id,
-                exc,
-            )
+        self._db.create_message(msg)
+        return True
+
+    async def _store_vector(
+        self,
+        message: discord.Message,
+        *,
+        content: str,
+    ) -> bool:
+        """Store one message in vector memory. Returns True when a write occurred."""
+        if self._vector_memory is None or not content:
             return False
+
+        await self._vector_memory.add_message(
+            message_id=str(message.id),
+            content=content,
+            author_name=message.author.display_name,
+            server_id=message.guild.id,
+            timestamp=message.created_at,
+        )
+        logger.info(
+            "Sent message to RAG from %s in %s/%s",
+            message.author.display_name,
+            message.guild.name,
+            message.channel.name,
+        )
+        return True
