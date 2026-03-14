@@ -281,7 +281,7 @@ Respond only with a JSON object matching the required schema."""
             "no editorial commentary, no emotional response."
         )
         user = (
-            "Describe this image in enough detail for a chatbot to understand what is "
+            "Describe this image in enough detail for a Discord personality bot to understand what is "
             "happening, what stands out visually, and what text or small details might "
             "matter."
         )

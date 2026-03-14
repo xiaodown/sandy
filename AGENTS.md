@@ -246,9 +246,19 @@ There is also a Pydantic `model_validator` on `BouncerResponse` that forces `use
   - `python -m sandy.logs show <trace_id>`
   - `python -m sandy.logs find --text "..."`
   - `python -m sandy.logs failures`
+  - `python -m sandy.health`
   - `python -m sandy.maintenance recall-find --query "..."`
   - `python -m sandy.maintenance delete-vector --discord-message-id ...`
   - `python -m sandy.maintenance purge-vector-from-recall --query "..." --yes`
+
+### Startup health policy
+
+- Startup uses the same health module as `python -m sandy.health`.
+- Hard failures should abort startup only for things Sandy cannot safely run without:
+  missing Discord token, malformed config values, unwritable local state paths, Recall init failure, registry DB failure.
+- Soft dependency problems should warn loudly but not block startup:
+  Ollama reachability, missing configured models, vector-memory availability, SearXNG reachability.
+- Do not quietly promote every optional dependency to a startup gate just because a check exists. That would turn degraded mode into unnecessary downtime.
 
 ## Known rough edges
 

@@ -7,9 +7,12 @@ Usage:
 
 import argparse
 import asyncio
+import logging
 import os
 
 from dotenv import load_dotenv
+
+from .health import collect_health_report, log_startup_report
 
 # Parse args BEFORE importing .bot — bot.py reads DB_DIR and DISCORD_API_KEY
 # at module level, so we need the env vars set first.
@@ -33,13 +36,25 @@ else:
     # Default to prod unless .env already set something else.
     os.environ.setdefault("DB_DIR", "data/prod/")
 
-# NOW it's safe to import bot — all env vars are resolved.
-from .bot import bot, DISCORD_API_KEY, logger, pipeline, shutdown_background_work  # noqa: E402
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+)
+startup_logger = logging.getLogger("sandy.startup")
 
 
-async def _main() -> None:
+async def _main() -> int:
     mode = "TEST" if args.test else "PROD"
-    logger.info("Starting Sandy in %s mode (DB_DIR=%s)", mode, os.environ.get("DB_DIR"))
+    startup_logger.info("Starting Sandy in %s mode (DB_DIR=%s)", mode, os.environ.get("DB_DIR"))
+    report = await collect_health_report(test_mode=args.test)
+    log_startup_report(report, startup_logger)
+    if report.hard_failures:
+        startup_logger.error("Aborting startup due to %d hard failure(s)", len(report.hard_failures))
+        return 1
+
+    # Import the Discord stack only after startup prerequisites are satisfied.
+    from .bot import bot, DISCORD_API_KEY, logger, pipeline, shutdown_background_work  # noqa: E402
+
     try:
         prewarm_enabled = os.getenv("PREWARM_MODEL") == "True"
         prewarm_model_name = os.getenv("PREWARM_MODEL_NAME")
@@ -52,12 +67,14 @@ async def _main() -> None:
         await bot.start(DISCORD_API_KEY)
     except Exception as exc:
         logger.error("Fatal: %s", exc)
+        return 1
     finally:
         await shutdown_background_work()
         await bot.close()
+    return 0
 
 
 try:
-    asyncio.run(_main())
+    raise SystemExit(asyncio.run(_main()))
 except KeyboardInterrupt:
-    logger.info("^c caught - stand by, shutting down cleanly...")
+    startup_logger.info("^c caught - stand by, shutting down cleanly...")

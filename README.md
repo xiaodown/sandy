@@ -134,6 +134,24 @@ Tests are developer checks, not startup checks. Runtime sanity checks like
 "is Ollama up" or "is SearXNG reachable" should live in a separate preflight
 command later instead of being mixed into `pytest`.
 
+## Health Checks
+
+Sandy has a separate health/preflight command:
+
+```bash
+source .venv/bin/activate
+python -m sandy.health
+python -m sandy.health --test
+python -m sandy.health --json
+```
+
+Startup now uses the same check logic with a hard/soft split:
+
+- hard failures abort startup: missing Discord token, broken local state paths, Recall init/migration failure, registry DB failure, malformed numeric config
+- soft failures warn only: Ollama reachability, missing configured models, vector-memory availability, SearXNG reachability
+
+That split is deliberate. Sandy should not stay dead just because an optional dependency is temporarily unhealthy.
+
 ## Inspecting logs
 
 Sandy stores:
