@@ -50,7 +50,7 @@ The brain model does not do tool calling. That was tried and it was bad. The bou
 ### 1. Clone and install
 
 ```bash
-git clone <repo-url> sandy
+git clone https://github.com/xiaodown/sandy.git
 cd sandy
 uv venv
 source .venv/bin/activate
