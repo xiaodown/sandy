@@ -105,12 +105,32 @@ class MemoryClient:
             )
 
         if self._llm is not None and content_for_storage:
-            tags = await self._llm.ask_tagger(content_for_storage)
-            # Strip leading hyphen or emdash from each tag
-            tags = [t.lstrip("-—") for t in tags]
+            try:
+                tags = await self._llm.ask_tagger(content_for_storage)
+                # Strip leading hyphen or emdash from each tag
+                tags = [t.lstrip("-—") for t in tags]
+            except Exception as exc:
+                logger.error(
+                    "Tagger failed for message %s in %s/%s: %s",
+                    message.id,
+                    message.guild.name,
+                    message.channel.name,
+                    exc,
+                )
+                tags = []
 
             if len(content_for_storage) > self.SUMMARIZE_THRESHOLD:
-                summary = await self._llm.ask_summarizer(content_for_storage)
+                try:
+                    summary = await self._llm.ask_summarizer(content_for_storage)
+                except Exception as exc:
+                    logger.error(
+                        "Summarizer failed for message %s in %s/%s: %s",
+                        message.id,
+                        message.guild.name,
+                        message.channel.name,
+                        exc,
+                    )
+                    summary = None
 
         stored = self._store(message, tags=tags or None, summary=summary, content_override=content_for_storage or None)
 
