@@ -80,7 +80,10 @@ class MemoryWorker:
                     return
 
                 message, image_descriptions = item
-                await self._handler(message, image_descriptions=image_descriptions)
+                try:
+                    await self._handler(message, image_descriptions=image_descriptions)
+                except Exception:
+                    logger.exception("Memory worker handler failed for message %s", getattr(message, "id", "?"))
             finally:
                 self._queue.task_done()
 
@@ -515,7 +518,7 @@ class SandyPipeline:
         history,
         rag_query_text: str,
         bouncer_result,
-    ) -> None:
+    ) -> bool:
         # 5. Optional tool execution / tool-context construction
         tool_context = await self._run_tool_step(message, trace, bouncer_result)
 
@@ -598,7 +601,7 @@ class SandyPipeline:
                 message.guild.name,
                 message.channel.name,
             )
-            return
+            return False
 
         try:
             # 9. Reply send
@@ -626,6 +629,7 @@ class SandyPipeline:
                 sent_parts,
                 brain_response.done_reason if brain_response else None,
             )
+            return True
         except Exception:
             self.trace_event(trace, "reply_send_completed", status="error")
             logger.exception(
@@ -633,10 +637,12 @@ class SandyPipeline:
                 message.guild.name,
                 message.channel.name,
             )
+            return False
 
     async def handle_message(self, message: discord.Message, *, bot_user) -> None:
         trace = TurnTrace.from_message(message)
         turn_started = time.perf_counter()
+        replied = False
 
         # 1. Turn intake / trace bootstrap
         self.trace_event(
@@ -741,7 +747,7 @@ class SandyPipeline:
         # 6-9. Tool -> RAG -> brain -> reply handling - see _run_reply_pipeline()
         if bouncer_result.should_respond:
             async with message.channel.typing():
-                await self._run_reply_pipeline(
+                replied = await self._run_reply_pipeline(
                     message,
                     bot_user=bot_user,
                     trace=trace,
@@ -755,7 +761,7 @@ class SandyPipeline:
             trace,
             "turn_completed",
             duration_ms=int((time.perf_counter() - turn_started) * 1000),
-            replied=bouncer_result.should_respond,
+            replied=replied,
         )
 
     async def shutdown(self) -> None:

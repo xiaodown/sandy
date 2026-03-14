@@ -103,7 +103,7 @@ class VectorMemory:
         author_name: str,
         server_id: int,
         timestamp: datetime,
-    ) -> None:
+    ) -> bool:
         """Embed and upsert one message into the vector store.
 
         message_id  — unique string key (Discord snowflake as str recommended)
@@ -113,30 +113,28 @@ class VectorMemory:
         timestamp   — message creation time (tz-aware UTC preferred)
         """
         if not content or not content.strip():
-            return
+            return False
         # Skip pure placeholder text stored by the Recall server for attachments.
         if content.strip() == "(no text content)":
-            return
-        try:
-            resp = await self._embed_client.embed(model=_EMBED_MODEL, input=content)
-            embedding = resp.embeddings[0]
-            ts_str = timestamp.isoformat() if timestamp else ""
-            self._collection.upsert(
-                ids=[message_id],
-                embeddings=[embedding],
-                documents=[content],
-                metadatas=[{
-                    "author_name": author_name,
-                    "server_id":   server_id,
-                    "timestamp":   ts_str,
-                }],
-            )
-            logger.debug(
-                "VectorMemory.add_message stored id=%s server=%d author=%r",
-                message_id, server_id, author_name,
-            )
-        except Exception as exc:
-            logger.error("VectorMemory.add_message failed (id=%s): %s", message_id, exc)
+            return False
+        resp = await self._embed_client.embed(model=_EMBED_MODEL, input=content)
+        embedding = resp.embeddings[0]
+        ts_str = timestamp.isoformat() if timestamp else ""
+        self._collection.upsert(
+            ids=[message_id],
+            embeddings=[embedding],
+            documents=[content],
+            metadatas=[{
+                "author_name": author_name,
+                "server_id":   server_id,
+                "timestamp":   ts_str,
+            }],
+        )
+        logger.debug(
+            "VectorMemory.add_message stored id=%s server=%d author=%r",
+            message_id, server_id, author_name,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Read

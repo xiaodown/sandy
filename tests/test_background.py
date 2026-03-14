@@ -60,3 +60,23 @@ async def test_memory_worker_rejects_enqueue_after_shutdown():
 
     with pytest.raises(RuntimeError, match="Memory worker is closed"):
         await worker.enqueue(type("Message", (), {"id": 1})())
+
+
+@pytest.mark.asyncio
+async def test_memory_worker_logs_handler_error_and_keeps_draining_queue():
+    calls: list[int] = []
+
+    async def handler(message, image_descriptions=None):
+        calls.append(message.id)
+        if message.id == 1:
+            raise RuntimeError("boom")
+
+    worker = MemoryWorker(handler)
+    run_task = asyncio.create_task(worker.run())
+
+    await worker.enqueue(type("Message", (), {"id": 1})())
+    await worker.enqueue(type("Message", (), {"id": 2})())
+    await worker.shutdown()
+    await run_task
+
+    assert calls == [1, 2]

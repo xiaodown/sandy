@@ -207,10 +207,11 @@ Set `DB_DIR` for prod and `TEST_DB_DIR` for test in `.env`. `python -m sandy --t
 sandy/
 ├── sandy/                  # Python package
 │   ├── __main__.py         # entry point (python -m sandy)
-│   ├── bot.py              # Discord event loop, message pipeline
+│   ├── bot.py              # Discord client lifecycle and event glue
 │   ├── llm.py              # ollama interface (brain, bouncer, tagger, summarizer, vision)
 │   ├── prompt.py           # all system prompts
 │   ├── memory.py           # tag + summarize + store pipeline
+│   ├── pipeline.py         # message-turn orchestration
 │   ├── tools.py            # tool definitions and dispatch
 │   ├── registry.py         # server/channel/user lookup cache (SQLite)
 │   ├── last10.py           # per-channel message cache
@@ -227,7 +228,7 @@ sandy/
 
 ## Tools
 
-Sandy has seven tools. The bouncer decides when to use them — the brain never calls tools directly.
+Sandy has eight tools. The bouncer decides when to use them — the brain never calls tools directly.
 
 | Tool | What it does |
 |------|-------------|
@@ -238,6 +239,7 @@ Sandy has seven tools. The bouncer decides when to use them — the brain never 
 | `search_web` | Search the internet via SearXNG |
 | `steam_browse` | Browse Steam top sellers, specials, upcoming, and new releases |
 | `get_current_time` | Current date and time |
+| `dice_roll` | Roll one or more groups of dice |
 
 ## License
 

@@ -305,3 +305,22 @@ async def test_vector_query_passes_server_filter_to_chroma():
     assert "<friend>: private message" in result
     assert recorded["where"] == {"server_id": 4242}
     assert recorded["n_results"] == 3
+
+
+@pytest.mark.asyncio
+async def test_vector_add_message_raises_on_embed_failure():
+    vector_memory = VectorMemory.__new__(VectorMemory)
+    vector_memory._embed_client = SimpleNamespace(
+        embed=AsyncMock(side_effect=RuntimeError("embed down"))
+    )
+    vector_memory._collection = SimpleNamespace(upsert=lambda **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="embed down"):
+        await VectorMemory.add_message(
+            vector_memory,
+            message_id="123",
+            content="hello",
+            author_name="friend",
+            server_id=42,
+            timestamp=datetime.now(UTC),
+        )
