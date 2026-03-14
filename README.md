@@ -134,6 +134,29 @@ Tests are developer checks, not startup checks. Runtime sanity checks like
 "is Ollama up" or "is SearXNG reachable" should live in a separate preflight
 command later instead of being mixed into `pytest`.
 
+## Inspecting logs
+
+Sandy stores:
+
+- compact turn/stage traces in `data/<mode>/logs/trace_events.db`
+- full forensic artifacts in `data/<mode>/logs/sandy.jsonl`
+
+Use the local CLI to inspect them:
+
+```bash
+source .venv/bin/activate
+python -m sandy.logs recent
+python -m sandy.logs show 1482258945799094444
+python -m sandy.logs find --text "color coding"
+python -m sandy.logs failures
+```
+
+Use `--test` with the CLI to read `TEST_DB_DIR` instead of `DB_DIR`:
+
+```bash
+python -m sandy.logs --test recent
+```
+
 ## Data layout
 
 ```
