@@ -9,6 +9,9 @@ handover*
 .python-version
 *.egg-info/
 .github*
+# Test artifacts
+tests/.testdata/
+
 
 
 # Byte-compiled / optimized / DLL files
