@@ -259,6 +259,112 @@ async def test_search_web_returns_error_on_http_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_steam_browse_formats_specials(monkeypatch):
+    fake_client = FakeAsyncClient(
+        FakeSearchResponse(
+            {
+                "specials": {
+                    "name": "Specials",
+                    "items": [
+                        {
+                            "id": 620,
+                            "name": "Portal 2",
+                            "discount_percent": 80,
+                            "final_price": 199,
+                            "original_price": 999,
+                            "currency": "USD",
+                            "windows_available": True,
+                            "mac_available": True,
+                            "linux_available": True,
+                        }
+                    ],
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(tools.httpx, "AsyncClient", lambda timeout: fake_client)
+    monkeypatch.setattr(tools, "_steam_featured_cache", None)
+    monkeypatch.setattr(tools, "_steam_featured_cache_expires_at", 0.0)
+
+    result = await tools._handle_steam_browse({"category": "specials", "limit": 1})
+
+    assert "Steam Specials:" in result
+    assert "Portal 2" in result
+    assert "$1.99 (-80% from $9.99)" in result
+    assert "https://store.steampowered.com/app/620" in result
+
+
+@pytest.mark.asyncio
+async def test_steam_browse_supports_upcoming_alias(monkeypatch):
+    fake_client = FakeAsyncClient(
+        FakeSearchResponse(
+            {
+                "coming_soon": {
+                    "name": "Coming Soon",
+                    "items": [
+                        {
+                            "id": 1234,
+                            "name": "Future Game",
+                            "discount_percent": 0,
+                            "final_price": 0,
+                            "original_price": None,
+                            "currency": "USD",
+                            "windows_available": True,
+                            "mac_available": False,
+                            "linux_available": False,
+                        }
+                    ],
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(tools.httpx, "AsyncClient", lambda timeout: fake_client)
+    monkeypatch.setattr(tools, "_steam_featured_cache", None)
+    monkeypatch.setattr(tools, "_steam_featured_cache_expires_at", 0.0)
+
+    result = await tools._handle_steam_browse({"category": "upcoming"})
+
+    assert "Steam Coming Soon:" in result
+    assert "Future Game — coming soon [Win]" in result
+
+
+@pytest.mark.asyncio
+async def test_steam_browse_reuses_cache(monkeypatch):
+    fake_client = FakeAsyncClient(
+        FakeSearchResponse(
+            {
+                "top_sellers": {
+                    "name": "Top Sellers",
+                    "items": [
+                        {
+                            "id": 5678,
+                            "name": "Hit Game",
+                            "discount_percent": 0,
+                            "final_price": 5999,
+                            "original_price": 5999,
+                            "currency": "USD",
+                            "windows_available": True,
+                            "mac_available": False,
+                            "linux_available": False,
+                        }
+                    ],
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(tools.httpx, "AsyncClient", lambda timeout: fake_client)
+    monkeypatch.setattr(tools, "_steam_featured_cache", None)
+    monkeypatch.setattr(tools, "_steam_featured_cache_expires_at", 0.0)
+
+    first = await tools._handle_steam_browse({"category": "top_sellers"})
+    second = await tools._handle_steam_browse({"category": "top_sellers"})
+
+    assert "Hit Game" in first
+    assert second == first
+    assert len(fake_client.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_search_web_returns_no_results_message(monkeypatch):
     fake_client = FakeAsyncClient(FakeSearchResponse({"results": []}))
     monkeypatch.setattr(tools.httpx, "AsyncClient", lambda timeout: fake_client)

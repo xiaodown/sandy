@@ -213,7 +213,7 @@ sandy/
 
 ## Tools
 
-Sandy has six tools. The bouncer decides when to use them — the brain never calls tools directly.
+Sandy has seven tools. The bouncer decides when to use them — the brain never calls tools directly.
 
 | Tool | What it does |
 |------|-------------|
@@ -222,6 +222,7 @@ Sandy has six tools. The bouncer decides when to use them — the brain never ca
 | `recall_by_topic` | Fetch messages by topic tag |
 | `search_memories` | Full-text search across all archived messages |
 | `search_web` | Search the internet via SearXNG |
+| `steam_browse` | Browse Steam top sellers, specials, upcoming, and new releases |
 | `get_current_time` | Current date and time |
 
 ## License
