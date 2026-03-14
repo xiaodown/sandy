@@ -54,7 +54,7 @@ git clone <repo-url> sandy
 cd sandy
 uv venv
 source .venv/bin/activate
-uv pip install -e .
+uv pip install -e ".[dev]"
 ```
 
 ### 2. Configure
@@ -113,6 +113,26 @@ python -m sandy
 ```
 
 That's it. Ctrl+C to stop.
+
+## Running tests
+
+Sandy uses `pytest`.
+
+```bash
+source .venv/bin/activate
+pytest
+```
+
+For faster iteration while you're working on one area:
+
+```bash
+pytest tests/test_bot_pipeline.py
+pytest -k memory
+```
+
+Tests are developer checks, not startup checks. Runtime sanity checks like
+"is Ollama up" or "is SearXNG reachable" should live in a separate preflight
+command later instead of being mixed into `pytest`.
 
 ## Data layout
 

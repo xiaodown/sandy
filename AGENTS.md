@@ -12,10 +12,13 @@ All inference runs locally. No cloud APIs. The stack is Python 3.12+, discord.py
 
 ```bash
 # Setup
-uv venv && source .venv/bin/activate && uv pip install -e .
+uv venv && source .venv/bin/activate && uv pip install -e ".[dev]"
 
 # Run
 python -m sandy
+
+# Test
+pytest
 
 # Verify ollama is up
 systemctl status ollama
@@ -24,7 +27,7 @@ systemctl status ollama
 curl 'http://localhost:8888/search?q=test&format=json'
 ```
 
-Package manager is `uv`. Virtual environment lives at `.venv/`. The package is installed in editable mode (`uv pip install -e .`). There is no test suite yet.
+Package manager is `uv`. Virtual environment lives at `.venv/`. Install in editable mode with dev dependencies via `uv pip install -e ".[dev]"`. Tests run with `pytest`.
 
 ## Package structure
 
