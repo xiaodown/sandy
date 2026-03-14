@@ -129,14 +129,15 @@ def make_message(*, author_bot: bool = False, content: str = "hey sandy") -> Dum
 def bot_module(monkeypatch):
     import sandy.bot as bot_module
 
-    monkeypatch.setattr(bot_module, "_trace_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bot_module.pipeline, "trace_event", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         bot_module,
         "bot",
         SimpleNamespace(user=SimpleNamespace(id=999, display_name="Sandy")),
     )
-    monkeypatch.setattr(bot_module, "registry", SimpleNamespace(ensure_seen=lambda message: None))
+    monkeypatch.setattr(bot_module.pipeline, "registry", SimpleNamespace(ensure_seen=lambda message: None))
     monkeypatch.setattr(bot_module, "background_tasks", FakeBackgroundTasks())
+    monkeypatch.setattr(bot_module.pipeline, "background_tasks", bot_module.background_tasks)
     return bot_module
 
 
@@ -165,9 +166,9 @@ async def test_bot_messages_skip_bouncer_and_are_still_enqueued(bot_module, monk
     memory_worker = FakeMemoryWorker()
     llm = SimpleNamespace(ask_bouncer=AsyncMock())
 
-    monkeypatch.setattr(bot_module, "cache", cache)
-    monkeypatch.setattr(bot_module, "memory_worker", memory_worker)
-    monkeypatch.setattr(bot_module, "llm", llm)
+    monkeypatch.setattr(bot_module.pipeline, "cache", cache)
+    monkeypatch.setattr(bot_module.pipeline, "memory_worker", memory_worker)
+    monkeypatch.setattr(bot_module.pipeline, "llm", llm)
 
     await bot_module.on_message(message)
 
@@ -199,12 +200,12 @@ async def test_memory_is_enqueued_before_reply_send_failure(bot_module, monkeypa
         steps.append("send")
         raise RuntimeError("discord exploded")
 
-    monkeypatch.setattr(bot_module, "cache", cache)
-    monkeypatch.setattr(bot_module, "memory_worker", memory_worker)
-    monkeypatch.setattr(bot_module, "llm", llm)
-    monkeypatch.setattr(bot_module, "vector_memory", vector_memory)
-    monkeypatch.setattr(bot_module, "_describe_attachments", AsyncMock(return_value=[]))
-    monkeypatch.setattr(bot_module, "_send_reply", fake_send_reply)
+    monkeypatch.setattr(bot_module.pipeline, "cache", cache)
+    monkeypatch.setattr(bot_module.pipeline, "memory_worker", memory_worker)
+    monkeypatch.setattr(bot_module.pipeline, "llm", llm)
+    monkeypatch.setattr(bot_module.pipeline, "vector_memory", vector_memory)
+    monkeypatch.setattr(bot_module.pipeline, "describe_attachments", AsyncMock(return_value=[]))
+    monkeypatch.setattr(bot_module.pipeline, "send_reply", fake_send_reply)
 
     await bot_module.on_message(message)
 
@@ -235,13 +236,13 @@ async def test_unknown_tool_is_ignored_without_dispatch(bot_module, monkeypatch)
     )
     send_reply = AsyncMock(return_value=1)
 
-    monkeypatch.setattr(bot_module, "cache", cache)
-    monkeypatch.setattr(bot_module, "memory_worker", memory_worker)
-    monkeypatch.setattr(bot_module, "llm", llm)
-    monkeypatch.setattr(bot_module, "vector_memory", vector_memory)
-    monkeypatch.setattr(bot_module, "tools", tools)
-    monkeypatch.setattr(bot_module, "_describe_attachments", AsyncMock(return_value=[]))
-    monkeypatch.setattr(bot_module, "_send_reply", send_reply)
+    monkeypatch.setattr(bot_module.pipeline, "cache", cache)
+    monkeypatch.setattr(bot_module.pipeline, "memory_worker", memory_worker)
+    monkeypatch.setattr(bot_module.pipeline, "llm", llm)
+    monkeypatch.setattr(bot_module.pipeline, "vector_memory", vector_memory)
+    monkeypatch.setattr(bot_module.pipeline, "tools_module", tools)
+    monkeypatch.setattr(bot_module.pipeline, "describe_attachments", AsyncMock(return_value=[]))
+    monkeypatch.setattr(bot_module.pipeline, "send_reply", send_reply)
 
     await bot_module.on_message(message)
 
@@ -270,12 +271,12 @@ async def test_attachment_descriptions_feed_rag_query_and_memory_enqueue(bot_mod
     send_reply = AsyncMock(return_value=1)
     image_descriptions = ["a cat sleeping on a couch"]
 
-    monkeypatch.setattr(bot_module, "cache", cache)
-    monkeypatch.setattr(bot_module, "memory_worker", memory_worker)
-    monkeypatch.setattr(bot_module, "llm", llm)
-    monkeypatch.setattr(bot_module, "vector_memory", vector_memory)
-    monkeypatch.setattr(bot_module, "_describe_attachments", AsyncMock(return_value=image_descriptions))
-    monkeypatch.setattr(bot_module, "_send_reply", send_reply)
+    monkeypatch.setattr(bot_module.pipeline, "cache", cache)
+    monkeypatch.setattr(bot_module.pipeline, "memory_worker", memory_worker)
+    monkeypatch.setattr(bot_module.pipeline, "llm", llm)
+    monkeypatch.setattr(bot_module.pipeline, "vector_memory", vector_memory)
+    monkeypatch.setattr(bot_module.pipeline, "describe_attachments", AsyncMock(return_value=image_descriptions))
+    monkeypatch.setattr(bot_module.pipeline, "send_reply", send_reply)
 
     await bot_module.on_message(message)
 
