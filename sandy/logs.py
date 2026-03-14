@@ -115,6 +115,7 @@ def _summarize_recent_turns(
     limit: int,
     human_only: bool = False,
 ) -> list[dict[str, Any]]:
+    fetch_limit = limit if not human_only else max(limit * 4, limit + 10)
     turn_rows = conn.execute(
         """
         SELECT created_at, trace_id, payload_json
@@ -123,7 +124,7 @@ def _summarize_recent_turns(
         ORDER BY created_at DESC
         LIMIT ?
         """,
-        (limit,),
+        (fetch_limit,),
     ).fetchall()
     results: list[dict[str, Any]] = []
     for row in turn_rows:

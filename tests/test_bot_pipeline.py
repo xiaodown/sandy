@@ -182,6 +182,7 @@ async def test_bot_messages_skip_bouncer_and_are_still_enqueued(bot_module, monk
 async def test_memory_is_enqueued_before_reply_send_failure(bot_module, monkeypatch):
     message = make_message()
     steps: list[str] = []
+    trace_events: list[tuple[str, dict]] = []
     cache = FakeCache()
     memory_worker = FakeMemoryWorker(steps)
     llm = SimpleNamespace(
@@ -207,6 +208,11 @@ async def test_memory_is_enqueued_before_reply_send_failure(bot_module, monkeypa
     monkeypatch.setattr(bot_module.pipeline, "vector_memory", vector_memory)
     monkeypatch.setattr(
         bot_module.pipeline,
+        "trace_event",
+        lambda _trace, stage, **kwargs: trace_events.append((stage, kwargs)),
+    )
+    monkeypatch.setattr(
+        bot_module.pipeline,
         "describe_attachments",
         AsyncMock(return_value=AttachmentProcessingResult(descriptions=[])),
     )
@@ -216,6 +222,8 @@ async def test_memory_is_enqueued_before_reply_send_failure(bot_module, monkeypa
 
     assert steps == ["enqueue", "send"]
     assert memory_worker.calls == [(message, [])]
+    assert ("reply_send_completed", {"status": "error"}) in trace_events
+    assert trace_events[-1] == ("turn_completed", {"duration_ms": trace_events[-1][1]["duration_ms"], "replied": False})
 
 
 @pytest.mark.asyncio

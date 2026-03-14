@@ -37,7 +37,8 @@ All source code lives in the `sandy/` Python package. There are no source files 
 sandy/
 ├── __init__.py         # package marker
 ├── __main__.py         # entry point: python -m sandy
-├── bot.py              # Discord event loop, full message pipeline
+├── bot.py              # Discord client lifecycle, event handlers, shutdown glue
+├── pipeline.py         # message-turn orchestration + memory worker
 ├── llm.py              # async ollama wrapper (brain, bouncer, tagger, summarizer, vision)
 ├── prompt.py           # all system prompts as static factory methods on SandyPrompt
 ├── memory.py           # tag → summarize → store pipeline (Recall + ChromaDB)
@@ -59,13 +60,15 @@ All imports within the package are relative (`from .llm import OllamaInterface`,
 ```
 Discord message
   → bot.py              on_message entry point
-  → bot.py              _describe_attachments (vision model, if images)
+  → pipeline.py         handle_message
+  → pipeline.py         _describe_attachments (vision model, if images)
   → llm.py              ask_bouncer: should Sandy respond? + tool recommendation
   → tools.py            dispatch (execute tool, if bouncer recommended one)
-  → bot.py              _format_tool_context (frame results for brain injection)
+  → pipeline.py         _format_tool_context (frame results for brain injection)
   → vector_memory.py    query (RAG: semantically similar past messages)
   → llm.py              ask_brain: generate reply (NO tool calling — just talks)
-  → bot.py              send reply to Discord
+  → pipeline.py         send reply to Discord
+  → pipeline.py         memory worker enqueue
   → memory.py           process_and_store (background: tag → summarize → Recall + ChromaDB)
 ```
 
@@ -80,6 +83,8 @@ Discord message
 - **Server isolation is enforced at dispatch time.** `tools.dispatch()` forcibly injects `server_id` into all server-scoped tool calls and strips any hallucinated snowflake IDs (`channel_id`, `author_id`). The model never sees server_id in tool schemas.
 
 - **Sandy's own replies get stored and embedded.** Discord echoes bot messages back through `on_message`, and they go through the memory pipeline. This is intentional — her side of conversations is part of her memory.
+- **`steam_browse` currently bypasses RAG.** This is intentional. Fresh Steam storefront data is more trustworthy than stale bot-authored vector memories about storefront state.
+- **The bouncer has one deterministic Steam override in `llm.py`.** If the small bouncer model picks `search_web` for an obvious Steam storefront/category request, post-parse code rewrites it to `steam_browse`. This is not philosophically pure, but it is more reliable than trusting soft prompt wording.
 
 ## Configuration
 
@@ -113,6 +118,10 @@ Key env vars:
 | `RECALL_DB_NAME` | Recall DB filename | `recall.db` |
 | `SEARXNG_HOST` | SearXNG hostname | `127.0.0.1` |
 | `SEARXNG_PORT` | SearXNG port | `8888` |
+| `LOG_ROTATE_BYTES` | JSONL log rotation size in bytes | `20971520` |
+| `LOG_BACKUP_COUNT` | Number of rotated JSONL log files to keep | `10` |
+| `TRACE_RETENTION_DAYS` | Trace SQLite retention window | `14` |
+| `STEAM_BROWSE_CACHE_TTL_SECONDS` | Steam storefront cache TTL | `600` |
 
 Note: the code-level defaults in `llm.py` for model names are stale (`qwen2.5:14b`, old Llama 3B GGUF paths). They don't matter in practice because `.env` always overrides them, but be aware if you're reading the source.
 
@@ -131,17 +140,19 @@ Set `DB_DIR` for prod and `TEST_DB_DIR` for test in `.env`. `python -m sandy --t
 
 ### Recall database schema (v3)
 
-- `chat_messages` — main table: id, author_id, author_name, channel_id, channel_name, server_id, server_name, content, timestamp, summary
+### Recall database schema (v4)
+
+- `chat_messages` — main table: id, discord_message_id, author_id, author_name, channel_id, channel_name, server_id, server_name, content, timestamp, summary
 - `tags` — tag dictionary (id, name)
 - `message_tags` — M2M join table
 - `messages_fts` — FTS5 virtual table over content + summary
 - `schema_version` — migration tracking
 
-Migrations run automatically on `init_db()`. The database module (`recall/database.py`) handles v1→v2→v3 upgrades.
+Migrations run automatically on `init_db()`. The database module (`recall/database.py`) handles v1→v2→v3→v4 upgrades.
 
 ## Tools
 
-Six tools, defined in `tools.py`. The bouncer selects them; `bot.py` dispatches them.
+Eight tools, defined in `tools.py`. The bouncer selects them; `pipeline.py` dispatches them.
 
 | Tool | Server-scoped | Parameters |
 |------|:---:|------------|
@@ -150,7 +161,9 @@ Six tools, defined in `tools.py`. The bouncer selects them; `bot.py` dispatches 
 | `recall_by_topic` | yes | tag (required), author, hours_ago, limit |
 | `search_memories` | yes | query (required), author, hours_ago, channel, limit |
 | `search_web` | no | query (required), n_results (default 5, max 10) |
+| `steam_browse` | no | category (required), limit |
 | `get_current_time` | no | (none) |
+| `dice_roll` | no | dice (required) |
 
 ### Adding a new tool
 
@@ -159,7 +172,7 @@ Six tools, defined in `tools.py`. The bouncer selects them; `bot.py` dispatches 
 3. Register the name in `_HANDLERS`
 4. If it queries per-server data, add the name to `_SERVER_SCOPED_TOOLS`
 5. Add tool documentation to `bouncer_prompt()` in `prompt.py` (name, params, when-to-use guidance)
-6. If it needs custom result framing, add a case to `_format_tool_context()` in `bot.py`
+6. If it needs custom result framing, add a case to `_format_tool_context()` in `pipeline.py`
 
 ### Parameter remapping
 
@@ -217,7 +230,31 @@ There is also a Pydantic `model_validator` on `BouncerResponse` that forces `use
 
 - As of 2026-03-12, Sandy splits overlong brain replies into multiple Discord messages before send. Do not assume one `channel.send()` is always safe.
 - Message persistence is no longer tied to reply delivery. Incoming messages are queued for memory processing before the reply send path, so a Discord send failure does not skip Recall/RAG storage for the triggering user message.
-- Background memory processing now runs behind a single in-process queue/worker owned by `bot.py`. It is still deferred work, but it is no longer an unsupervised `asyncio.create_task(...)` fire-and-forget path.
+- Background memory processing now runs behind a single in-process queue/worker owned by `pipeline.py`. It is still deferred work, but it is no longer an unsupervised `asyncio.create_task(...)` fire-and-forget path.
+- As of 2026-03-14, the memory worker catches per-message handler failures and keeps draining the queue instead of dying on the first bad vector/embed path.
+
+## Tests and observability
+
+- The repo now has a real pytest suite. Run it with `pytest`.
+- Current coverage is focused where it matters: pipeline behavior, tools, memory/Recall/Chroma semantics, logging/trace CLI, and shutdown/background behavior.
+- Human-facing console logs are intentionally slimmer than the forensic sinks:
+  - console: colored, directional runtime logs
+  - JSONL: full forensic artifacts
+  - SQLite: compact trace timeline
+- Inspection CLIs:
+  - `python -m sandy.logs recent`
+  - `python -m sandy.logs show <trace_id>`
+  - `python -m sandy.logs find --text "..."`
+  - `python -m sandy.logs failures`
+  - `python -m sandy.maintenance recall-find --query "..."`
+  - `python -m sandy.maintenance delete-vector --discord-message-id ...`
+  - `python -m sandy.maintenance purge-vector-from-recall --query "..." --yes`
+
+## Known rough edges
+
+- The bouncer is in a workable middle ground right now, but still prompt-tuned rather than robustly evaluated.
+- The brain still occasionally overuses conversational follow-up questions; prompt guidance now pushes against that, but this is not “solved.”
+- Tool-informed turns can still get polluted by old conversation history in-channel even when RAG is bypassed. Steam is better now, not magically perfect.
 - Brain responses now log Ollama's `done_reason`. If you see `done_reason=length`, the model hit `num_predict`; that is a generation-cap issue, not a Discord send-limit issue.
 
 ## Conventions

@@ -206,3 +206,61 @@ def test_summarize_recent_turns_can_filter_bot_messages(tmp_path: Path) -> None:
 
     assert len(turns) == 1
     assert turns[0]["trace_id"] == "human"
+
+
+def test_summarize_recent_turns_human_only_backfills_past_bot_rows(tmp_path: Path) -> None:
+    conn = _make_trace_db(tmp_path / "trace.db")
+    rows = [
+        ("bot-newest", True),
+        ("bot-mid", True),
+        ("human-a", False),
+        ("human-b", False),
+    ]
+    forensic_records = {}
+    for idx, (trace_id, author_is_bot) in enumerate(rows, start=1):
+        conn.execute(
+            """
+            INSERT INTO trace_events (created_at, trace_id, stage, status, message_id, guild_id, channel_id, author_id, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"2026-03-14T06:00:0{idx}+00:00",
+                trace_id,
+                "message_received",
+                "ok",
+                idx,
+                1,
+                2,
+                3,
+                json.dumps({"trace_id": trace_id, "author_is_bot": author_is_bot}),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO trace_events (created_at, trace_id, stage, status, message_id, guild_id, channel_id, author_id, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"2026-03-14T06:00:1{idx}+00:00",
+                trace_id,
+                "turn_completed",
+                "ok",
+                idx,
+                1,
+                2,
+                3,
+                json.dumps({"trace_id": trace_id, "replied": False, "duration_ms": idx}),
+            ),
+        )
+        forensic_records[trace_id] = {
+            "turn_input": {
+                "author_name": "Sandy-test" if author_is_bot else f"alice-{idx}",
+                "channel_name": "general",
+                "guild_name": "Guild",
+                "resolved_content": trace_id,
+            }
+        }
+
+    turns = _summarize_recent_turns(conn, forensic_records, limit=2, human_only=True)
+
+    assert [turn["trace_id"] for turn in turns] == ["human-b", "human-a"]

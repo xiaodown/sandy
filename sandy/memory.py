@@ -321,17 +321,18 @@ class MemoryClient:
         if self._vector_memory is None or not content:
             return False
 
-        await self._vector_memory.add_message(
+        stored = await self._vector_memory.add_message(
             message_id=str(message.id),
             content=content,
             author_name=message.author.display_name,
             server_id=message.guild.id,
             timestamp=message.created_at,
         )
-        logger.info(
-            "Sent message to RAG from %s in %s/%s",
-            message.author.display_name,
-            message.guild.name,
-            message.channel.name,
-        )
-        return True
+        if stored:
+            logger.info(
+                "Sent message to RAG from %s in %s/%s",
+                message.author.display_name,
+                message.guild.name,
+                message.channel.name,
+            )
+        return bool(stored)
