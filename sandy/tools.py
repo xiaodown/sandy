@@ -78,6 +78,8 @@ async def _recall_query(**kwargs: Any) -> list | None:
     # The bouncer uses 'author' and 'query'; the DB expects 'author_name' and 'q'.
     if "author" in clean:
         clean["author_name"] = clean.pop("author")
+    if "channel" in clean:
+        clean["channel_name"] = clean.pop("channel")
     if "query" in clean:
         clean["q"] = clean.pop("query")
     try:
@@ -475,7 +477,7 @@ async def dispatch(
 
     # Log without server context to keep logs tidy (it's always the same value).
     loggable = {k: v for k, v in arguments.items() if k not in ("server_id",)}
-    logger.info("Sandy is using tool: %s  args=%s", tool_name, loggable)
+    logger.info("Using tool %s args=%s", tool_name, loggable)
 
     try:
         result = await handler(arguments)

@@ -34,7 +34,7 @@ else:
     os.environ.setdefault("DB_DIR", "data/prod/")
 
 # NOW it's safe to import bot — all env vars are resolved.
-from .bot import bot, DISCORD_API_KEY, llm, logger, shutdown_background_work  # noqa: E402
+from .bot import bot, DISCORD_API_KEY, logger, pipeline, shutdown_background_work  # noqa: E402
 
 
 async def _main() -> None:
@@ -45,7 +45,7 @@ async def _main() -> None:
         prewarm_model_name = os.getenv("PREWARM_MODEL_NAME")
         if prewarm_enabled and prewarm_model_name:
             logger.info("Beginning pre-warming of model %s before Discord connect", prewarm_model_name)
-            if await llm.warm_model(prewarm_model_name):
+            if await pipeline.llm.warm_model(prewarm_model_name):
                 logger.info("Pre-warming model %s complete", prewarm_model_name)
             else:
                 logger.warning("Pre-warming of model %s failed", prewarm_model_name)

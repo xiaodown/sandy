@@ -63,3 +63,24 @@ def event_payload(
         payload["duration_ms"] = duration_ms
     payload.update(fields)
     return payload
+
+
+def forensic_payload(
+    trace: TurnTrace,
+    artifact: str,
+    **fields: Any,
+) -> dict[str, Any]:
+    """Build a richer artifact payload for forensic JSONL capture."""
+    payload: dict[str, Any] = {
+        "trace_id": trace.trace_id,
+        "artifact": artifact,
+        "message_id": trace.message_id,
+        "guild_id": trace.guild_id,
+        "guild_name": trace.guild_name,
+        "channel_id": trace.channel_id,
+        "channel_name": trace.channel_name,
+        "author_id": trace.author_id,
+        "author_name": trace.author_name,
+    }
+    payload.update(fields)
+    return payload
