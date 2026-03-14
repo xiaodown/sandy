@@ -296,6 +296,7 @@ class MemoryClient:
         Returns True on success. Raises on failure so the caller can decide policy.
         """
         msg = ChatMessageCreate(
+            discord_message_id=message.id,
             author_id=message.author.id,
             author_name=message.author.display_name,
             channel_id=message.channel.id,

@@ -348,3 +348,46 @@ async def test_attachment_fallbacks_are_injected_when_image_cannot_be_inspected(
         "[Image: attached image could not be inspected because the file was too large]"
     )
     assert memory_worker.calls == [(message, [fallback])]
+
+
+@pytest.mark.asyncio
+async def test_steam_tool_skips_rag_query(bot_module, monkeypatch):
+    message = make_message(content="what's good on steam?")
+    cache = FakeCache()
+    memory_worker = FakeMemoryWorker()
+    llm = SimpleNamespace(
+        ask_bouncer=AsyncMock(
+            return_value=SimpleNamespace(
+                should_respond=True,
+                use_tool=True,
+                recommended_tool="steam_browse",
+                tool_parameters={"category": "top_sellers"},
+                reason="steam question",
+            )
+        ),
+        ask_brain=AsyncMock(return_value=BrainResponse(content="steam answer", done_reason="stop")),
+    )
+    vector_memory = SimpleNamespace(query=AsyncMock(return_value="stale rag"))
+    tools = SimpleNamespace(
+        KNOWN_TOOLS=frozenset({"steam_browse"}),
+        dispatch=AsyncMock(return_value="Steam Top Sellers:\n\n1. Hit Game"),
+    )
+    send_reply = AsyncMock(return_value=1)
+
+    monkeypatch.setattr(bot_module.pipeline, "cache", cache)
+    monkeypatch.setattr(bot_module.pipeline, "memory_worker", memory_worker)
+    monkeypatch.setattr(bot_module.pipeline, "llm", llm)
+    monkeypatch.setattr(bot_module.pipeline, "vector_memory", vector_memory)
+    monkeypatch.setattr(bot_module.pipeline, "tools_module", tools)
+    monkeypatch.setattr(
+        bot_module.pipeline,
+        "describe_attachments",
+        AsyncMock(return_value=AttachmentProcessingResult(descriptions=[])),
+    )
+    monkeypatch.setattr(bot_module.pipeline, "send_reply", send_reply)
+
+    await bot_module.on_message(message)
+
+    vector_memory.query.assert_not_awaited()
+    assert llm.ask_brain.await_args.kwargs["rag_context"] == ""
+    assert "Steam Top Sellers" in llm.ask_brain.await_args.kwargs["tool_context"]

@@ -16,7 +16,7 @@ from .models import ChatMessageCreate, ChatMessageResponse
 class ChatDatabase:
     """SQLite database handler for chat messages."""
 
-    CURRENT_SCHEMA_VERSION = 3
+    CURRENT_SCHEMA_VERSION = 4
 
     def __init__(self, db_path: str = "data/recall.db"):
         """Initialize database connection.
@@ -85,6 +85,11 @@ class ChatDatabase:
                 self._migrate_v3_fts()
                 self.set_schema_version(3)
                 print("✓ Migrated to version 3: Added FTS5 full-text search index")
+
+            if current_version < 4:
+                self._migrate_v4_discord_message_ids()
+                self.set_schema_version(4)
+                print("✓ Migrated to version 4: Added Discord message snowflake column")
 
     def _migrate_v1_create_initial_schema(self):
         """Migration v1: Create the original name-based schema (kept for upgrade path)."""
@@ -203,11 +208,28 @@ class ChatDatabase:
             """)
             conn.commit()
 
+    def _migrate_v4_discord_message_ids(self):
+        """Migration v4: add optional Discord message snowflake tracking."""
+        with self.get_connection() as conn:
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(chat_messages)").fetchall()
+            }
+            if "discord_message_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE chat_messages ADD COLUMN discord_message_id INTEGER"
+                )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_discord_message_id ON chat_messages(discord_message_id)"
+            )
+            conn.commit()
+
     def _create_v2_tables(self, conn: sqlite3.Connection):
         """Create the v2 schema tables (called by migration; reuses an open connection)."""
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_messages (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_message_id INTEGER,
                 author_id   INTEGER NOT NULL,
                 author_name TEXT    NOT NULL DEFAULT '',
                 channel_id  INTEGER NOT NULL,
@@ -236,6 +258,7 @@ class ChatDatabase:
         """)
         # Indexes for common query patterns
         for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS idx_discord_message_id ON chat_messages(discord_message_id)",
             "CREATE INDEX IF NOT EXISTS idx_author_id   ON chat_messages(author_id)",
             "CREATE INDEX IF NOT EXISTS idx_author_name ON chat_messages(author_name)",
             "CREATE INDEX IF NOT EXISTS idx_server_id   ON chat_messages(server_id)",
@@ -280,6 +303,7 @@ class ChatDatabase:
         timestamp = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
         return ChatMessageResponse(
             id=row["id"],
+            discord_message_id=row["discord_message_id"],
             author_id=row["author_id"],
             author_name=row["author_name"],
             channel_id=row["channel_id"],
@@ -301,10 +325,11 @@ class ChatDatabase:
         with self.get_connection() as conn:
             cursor = conn.execute("""
                 INSERT INTO chat_messages
-                    (author_id, author_name, channel_id, channel_name,
+                    (discord_message_id, author_id, author_name, channel_id, channel_name,
                      server_id, server_name, content, timestamp, summary)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
+                message.discord_message_id,
                 message.author_id, message.author_name,
                 message.channel_id, message.channel_name,
                 message.server_id, message.server_name,
@@ -334,6 +359,7 @@ class ChatDatabase:
         offset: int = 0,
         author_id: Optional[int] = None,
         author_name: Optional[str] = None,
+        discord_message_id: Optional[int] = None,
         server_id: Optional[int] = None,
         server_name: Optional[str] = None,
         channel_id: Optional[int] = None,
@@ -372,6 +398,10 @@ class ChatDatabase:
             elif author_name:
                 query += " AND cm.author_name = ?"
                 params.append(author_name)
+
+            if discord_message_id is not None:
+                query += " AND cm.discord_message_id = ?"
+                params.append(discord_message_id)
 
             if server_id is not None:
                 query += " AND cm.server_id = ?"
@@ -427,6 +457,17 @@ class ChatDatabase:
 
             rows = conn.execute(query, params).fetchall()
             return [self._row_to_response(row, conn) for row in rows]
+
+    def get_message_by_discord_id(self, discord_message_id: int) -> Optional[ChatMessageResponse]:
+        """Get a specific message by its original Discord snowflake, if stored."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM chat_messages WHERE discord_message_id = ?",
+                (discord_message_id,),
+            ).fetchone()
+            if row:
+                return self._row_to_response(row, conn)
+            return None
 
     def delete_message(self, message_id: int) -> bool:
         """Delete a message by ID. Returns True if deleted, False if not found."""

@@ -12,6 +12,7 @@ class ChatMessageCreate(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
+                "discord_message_id": 1482282320600891422,
                 "author_id": 215896334130905090,
                 "channel_id": 1359032552332621878,
                 "server_id": 1359032272382621875,
@@ -26,6 +27,10 @@ class ChatMessageCreate(BaseModel):
         }
     )
 
+    discord_message_id: Optional[int] = Field(
+        default=None,
+        description="Original Discord message snowflake, when known",
+    )
     # Snowflake IDs — stable, globally unique Discord identifiers
     author_id: int = Field(..., description="Discord user ID of the message author")
     channel_id: int = Field(..., description="Discord channel ID where the message was sent")
@@ -46,6 +51,7 @@ class ChatMessageResponse(BaseModel):
         json_schema_extra={
             "example": {
                 "id": 1,
+                "discord_message_id": 1482282320600891422,
                 "author_id": 215896334130905090,
                 "channel_id": 1359032552332621878,
                 "server_id": 1359032272382621875,
@@ -61,6 +67,7 @@ class ChatMessageResponse(BaseModel):
     )
 
     id: int
+    discord_message_id: Optional[int] = None
     author_id: int
     channel_id: int
     server_id: int

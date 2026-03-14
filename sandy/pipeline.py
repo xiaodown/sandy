@@ -50,6 +50,7 @@ _DISCORD_MESSAGE_LIMIT = 2000
 _MEMORY_TOOLS: frozenset[str] = frozenset({
     "recall_recent", "recall_from_user", "recall_by_topic", "search_memories",
 })
+_RAG_BYPASS_TOOLS: frozenset[str] = frozenset({"steam_browse"})
 
 
 @dataclass(slots=True)
@@ -520,24 +521,42 @@ class SandyPipeline:
 
         # 6. Semantic retrieval (RAG)
         ollama_history = history.to_ollama_messages(bot_user.id)
-        retrieval_started = time.perf_counter()
-        rag_context = await self.vector_memory.query(
-            rag_query_text,
-            server_id=message.guild.id,
-        )
-        self.trace_event(
-            trace,
-            "retrieval_completed",
-            duration_ms=int((time.perf_counter() - retrieval_started) * 1000),
-            context_chars=len(rag_context or ""),
-        )
-        _forensic_event(
-            trace,
-            "retrieval",
-            query_text=rag_query_text,
-            rag_context=rag_context,
-            ollama_history=ollama_history,
-        )
+        if bouncer_result.recommended_tool in _RAG_BYPASS_TOOLS:
+            rag_context = ""
+            self.trace_event(
+                trace,
+                "retrieval_completed",
+                status="skipped",
+                skipped_reason=f"tool:{bouncer_result.recommended_tool}",
+                context_chars=0,
+            )
+            _forensic_event(
+                trace,
+                "retrieval",
+                query_text=rag_query_text,
+                rag_context="",
+                ollama_history=ollama_history,
+                skipped_reason=f"tool:{bouncer_result.recommended_tool}",
+            )
+        else:
+            retrieval_started = time.perf_counter()
+            rag_context = await self.vector_memory.query(
+                rag_query_text,
+                server_id=message.guild.id,
+            )
+            self.trace_event(
+                trace,
+                "retrieval_completed",
+                duration_ms=int((time.perf_counter() - retrieval_started) * 1000),
+                context_chars=len(rag_context or ""),
+            )
+            _forensic_event(
+                trace,
+                "retrieval",
+                query_text=rag_query_text,
+                rag_context=rag_context,
+                ollama_history=ollama_history,
+            )
 
         # 7. Brain generation
         brain_started = time.perf_counter()
