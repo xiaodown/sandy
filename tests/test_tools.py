@@ -120,7 +120,7 @@ async def test_recall_query_translates_argument_names_and_drops_none(monkeypatch
     result = await tools._recall_query(
         author="friend",
         query="pizza",
-        channel=None,
+        channel="general",
         server_id=42,
         hours_ago=24,
     )
@@ -129,6 +129,7 @@ async def test_recall_query_translates_argument_names_and_drops_none(monkeypatch
     assert calls == [
         {
             "author_name": "friend",
+            "channel_name": "general",
             "q": "pizza",
             "server_id": 42,
             "hours_ago": 24,

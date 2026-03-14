@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from sandy.llm import BrainResponse
+from sandy.pipeline import AttachmentProcessingResult
 
 
 @dataclass
@@ -204,7 +205,11 @@ async def test_memory_is_enqueued_before_reply_send_failure(bot_module, monkeypa
     monkeypatch.setattr(bot_module.pipeline, "memory_worker", memory_worker)
     monkeypatch.setattr(bot_module.pipeline, "llm", llm)
     monkeypatch.setattr(bot_module.pipeline, "vector_memory", vector_memory)
-    monkeypatch.setattr(bot_module.pipeline, "describe_attachments", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        bot_module.pipeline,
+        "describe_attachments",
+        AsyncMock(return_value=AttachmentProcessingResult(descriptions=[])),
+    )
     monkeypatch.setattr(bot_module.pipeline, "send_reply", fake_send_reply)
 
     await bot_module.on_message(message)
@@ -241,7 +246,11 @@ async def test_unknown_tool_is_ignored_without_dispatch(bot_module, monkeypatch)
     monkeypatch.setattr(bot_module.pipeline, "llm", llm)
     monkeypatch.setattr(bot_module.pipeline, "vector_memory", vector_memory)
     monkeypatch.setattr(bot_module.pipeline, "tools_module", tools)
-    monkeypatch.setattr(bot_module.pipeline, "describe_attachments", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        bot_module.pipeline,
+        "describe_attachments",
+        AsyncMock(return_value=AttachmentProcessingResult(descriptions=[])),
+    )
     monkeypatch.setattr(bot_module.pipeline, "send_reply", send_reply)
 
     await bot_module.on_message(message)
@@ -275,7 +284,11 @@ async def test_attachment_descriptions_feed_rag_query_and_memory_enqueue(bot_mod
     monkeypatch.setattr(bot_module.pipeline, "memory_worker", memory_worker)
     monkeypatch.setattr(bot_module.pipeline, "llm", llm)
     monkeypatch.setattr(bot_module.pipeline, "vector_memory", vector_memory)
-    monkeypatch.setattr(bot_module.pipeline, "describe_attachments", AsyncMock(return_value=image_descriptions))
+    monkeypatch.setattr(
+        bot_module.pipeline,
+        "describe_attachments",
+        AsyncMock(return_value=AttachmentProcessingResult(descriptions=image_descriptions)),
+    )
     monkeypatch.setattr(bot_module.pipeline, "send_reply", send_reply)
 
     await bot_module.on_message(message)
@@ -288,3 +301,50 @@ async def test_attachment_descriptions_feed_rag_query_and_memory_enqueue(bot_mod
         server_id=message.guild.id,
     )
     assert memory_worker.calls == [(message, image_descriptions)]
+
+
+@pytest.mark.asyncio
+async def test_attachment_fallbacks_are_injected_when_image_cannot_be_inspected(bot_module, monkeypatch):
+    message = make_message(content="")
+    cache = FakeCache()
+    memory_worker = FakeMemoryWorker()
+    fallback = "attached image could not be inspected because the file was too large"
+    llm = SimpleNamespace(
+        ask_bouncer=AsyncMock(
+            return_value=SimpleNamespace(
+                should_respond=True,
+                use_tool=False,
+                recommended_tool=None,
+                tool_parameters=None,
+            )
+        ),
+        ask_brain=AsyncMock(return_value=BrainResponse(content="can't see it", done_reason="stop")),
+    )
+    vector_memory = SimpleNamespace(query=AsyncMock(return_value=""))
+    send_reply = AsyncMock(return_value=1)
+
+    monkeypatch.setattr(bot_module.pipeline, "cache", cache)
+    monkeypatch.setattr(bot_module.pipeline, "memory_worker", memory_worker)
+    monkeypatch.setattr(bot_module.pipeline, "llm", llm)
+    monkeypatch.setattr(bot_module.pipeline, "vector_memory", vector_memory)
+    monkeypatch.setattr(
+        bot_module.pipeline,
+        "describe_attachments",
+        AsyncMock(
+            return_value=AttachmentProcessingResult(
+                descriptions=[fallback],
+                fallback_count=1,
+                fallback_reasons=["oversized"],
+            )
+        ),
+    )
+    monkeypatch.setattr(bot_module.pipeline, "send_reply", send_reply)
+
+    await bot_module.on_message(message)
+
+    cached_message = cache.added[0]
+    assert cached_message.content == (
+        "[friend pasted an image into the chat]\n"
+        "[Image: attached image could not be inspected because the file was too large]"
+    )
+    assert memory_worker.calls == [(message, [fallback])]

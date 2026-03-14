@@ -22,7 +22,6 @@ into the brain's context before asking it to respond.
 """
 
 import asyncio
-import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -32,10 +31,12 @@ from pydantic import BaseModel, field_validator, model_validator
 from dotenv import load_dotenv
 
 from .prompt import SandyPrompt
+from .logconf import emit_forensic_record, get_logger
+from .trace import TurnTrace, forensic_payload
 
 load_dotenv()
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Model selection (from .env, with sensible defaults)
@@ -255,7 +256,13 @@ class OllamaInterface:
     # Bouncer — should Sandy respond?
     # ------------------------------------------------------------------
 
-    async def ask_bouncer(self, context: str, bot_name: str = "Sandy") -> BouncerResponse:
+    async def ask_bouncer(
+        self,
+        context: str,
+        bot_name: str = "Sandy",
+        *,
+        trace: TurnTrace | None = None,
+    ) -> BouncerResponse:
         """Decide whether Sandy should respond, and optionally which tool to use.
 
         context  — a formatted ChannelHistory string (from history.format()).
@@ -281,34 +288,38 @@ class OllamaInterface:
                         "num_ctx": _BOUNCER_NUM_CTX,
                     },
                 )
-            result = BouncerResponse.model_validate_json(response.message.content)
-            # If the model voted NO but its reason contains clear YES-signal phrases,
-            # the boolean is almost certainly wrong — trust the reason and flip it.
-            # This is a known failure mode: the model reasons correctly but then
-            # outputs the wrong boolean. Phrase list is intentionally conservative
-            # to avoid flipping legitimate NO decisions.
-            if not result.should_respond and any(
-                phrase in result.reason.lower()
-                for phrase in ("named", "mentioned", "addressed", "directed at",
-                               "asked sandy", "follow-up", "back-and-forth")
-            ):
-                logger.warning(
-                    "Bouncer incoherence: flipping False → True based on reason — %r",
-                    result.reason,
-                )
-                result.should_respond = True
+            raw_response = response.message.content or ""
+            result = BouncerResponse.model_validate_json(raw_response)
             # If she's not responding, tool fields are meaningless — zero them.
             if not result.should_respond:
                 result.use_tool = False
                 result.recommended_tool = None
                 result.tool_parameters = None
-            logger.info(
+            logger.debug(
                 "Bouncer → respond=%s  tool=%s(%s)  reason=%r",
                 result.should_respond,
                 result.recommended_tool or "none",
                 "yes" if result.use_tool else "no",
                 result.reason,
             )
+            if trace is not None:
+                emit_forensic_record(
+                    logger,
+                    "FORENSIC bouncer_decision",
+                    forensic_payload(
+                        trace,
+                        "bouncer_decision",
+                        model=_BOUNCER_MODEL,
+                        prompt_system=prompt.system,
+                        prompt_user=prompt.user,
+                        options={
+                            "temperature": _BOUNCER_TEMPERATURE,
+                            "num_ctx": _BOUNCER_NUM_CTX,
+                        },
+                        parsed_result=result.model_dump(),
+                        raw_response=raw_response,
+                    ),
+                )
             return result
         except Exception as exc:
             logger.error("Bouncer error (defaulting to no-respond): %s", exc)
@@ -404,6 +415,7 @@ class OllamaInterface:
         channel_name: str = "general",
         rag_context: Optional[str] = None,
         tool_context: Optional[str] = None,
+        trace: TurnTrace | None = None,
     ) -> Optional[BrainResponse]:
         """Generate a response from the Brain model.
 
@@ -458,11 +470,36 @@ class OllamaInterface:
                         "num_ctx":     _BRAIN_NUM_CTX,
                     },
                 )
-            return BrainResponse(
+            brain_response = BrainResponse(
                 content=response.message.content or "",
                 done_reason=response.done_reason,
                 eval_count=response.eval_count,
             )
+            if trace is not None:
+                emit_forensic_record(
+                    logger,
+                    "FORENSIC brain_generation",
+                    forensic_payload(
+                        trace,
+                        "brain_generation",
+                        model=_BRAIN_MODEL,
+                        prompt_system=prompt.system,
+                        prompt_user=prompt.user,
+                        system_content=system_content,
+                        conversation_messages=messages,
+                        rag_context=rag_context,
+                        tool_context=tool_context,
+                        options={
+                            "temperature": _BRAIN_TEMPERATURE,
+                            "num_predict": _BRAIN_NUM_PREDICT,
+                            "num_ctx": _BRAIN_NUM_CTX,
+                        },
+                        raw_response=brain_response.content,
+                        done_reason=brain_response.done_reason,
+                        eval_count=brain_response.eval_count,
+                    ),
+                )
+            return brain_response
         except Exception as exc:
             logger.error("Brain error: %s", exc)
             return None

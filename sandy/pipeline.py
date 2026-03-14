@@ -12,6 +12,7 @@ import io
 import os
 import re
 import time
+from dataclasses import dataclass
 
 import discord
 from dotenv import load_dotenv
@@ -27,11 +28,11 @@ from .last10 import (
     resolve_mentions,
 )
 from .llm import OllamaInterface
-from .logconf import get_logger
+from .logconf import emit_forensic_record, get_logger
 from .memory import MemoryClient
 from .recall import ChatDatabase
 from .registry import Registry
-from .trace import TurnTrace, event_payload
+from .trace import TurnTrace, event_payload, forensic_payload
 from .vector_memory import VectorMemory
 
 load_dotenv()
@@ -49,6 +50,13 @@ _DISCORD_MESSAGE_LIMIT = 2000
 _MEMORY_TOOLS: frozenset[str] = frozenset({
     "recall_recent", "recall_from_user", "recall_by_topic", "search_memories",
 })
+
+
+@dataclass(slots=True)
+class AttachmentProcessingResult:
+    descriptions: list[str]
+    fallback_count: int = 0
+    fallback_reasons: list[str] | None = None
 
 
 class MemoryWorker:
@@ -120,7 +128,19 @@ def _trace_event(
         duration_ms=duration_ms,
         **fields,
     )
-    logger.info("TRACE %s", payload)
+    logger.info(
+        "TRACE %s",
+        payload,
+        extra={"event_payload": payload, "log_to_console": False},
+    )
+
+
+def _forensic_event(trace: TurnTrace, artifact: str, **fields: object) -> None:
+    emit_forensic_record(
+        logger,
+        f"FORENSIC {artifact}",
+        forensic_payload(trace, artifact, **fields),
+    )
 
 
 def _split_reply(reply: str, limit: int = _DISCORD_MESSAGE_LIMIT) -> list[str]:
@@ -259,8 +279,13 @@ async def _send_reply(message: discord.Message, reply: str) -> int:
     return len(parts)
 
 
-async def _describe_attachments(message: discord.Message, llm) -> list[str]:
+def _fallback_attachment_description(reason: str) -> str:
+    return f"attached image could not be inspected because {reason}"
+
+
+async def _describe_attachments(message: discord.Message, llm) -> AttachmentProcessingResult:
     descriptions: list[str] = []
+    fallback_reasons: list[str] = []
     for attachment in message.attachments:
         content_type = (attachment.content_type or "").split(";")[0].strip().lower()
         if content_type not in _VISION_CONTENT_TYPES:
@@ -274,11 +299,15 @@ async def _describe_attachments(message: discord.Message, llm) -> list[str]:
                 "Skipping oversized image %s (%d MB)",
                 attachment.filename, attachment.size // (1024 * 1024),
             )
+            descriptions.append(_fallback_attachment_description("the file was too large"))
+            fallback_reasons.append("oversized")
             continue
         try:
             image_bytes = await attachment.read()
         except Exception as exc:
             logger.error("Failed to download attachment %s: %s", attachment.filename, exc)
+            descriptions.append(_fallback_attachment_description("it could not be downloaded"))
+            fallback_reasons.append("download_failed")
             continue
         if content_type == "image/webp":
             try:
@@ -289,6 +318,8 @@ async def _describe_attachments(message: discord.Message, llm) -> list[str]:
                 logger.debug("Converted WebP→JPEG for %s", attachment.filename)
             except Exception as exc:
                 logger.error("WebP conversion failed for %s: %s", attachment.filename, exc)
+                descriptions.append(_fallback_attachment_description("it could not be processed"))
+                fallback_reasons.append("conversion_failed")
                 continue
         desc = await llm.ask_vision(image_bytes)
         if desc:
@@ -298,7 +329,13 @@ async def _describe_attachments(message: discord.Message, llm) -> list[str]:
             )
         else:
             logger.warning("Vision returned nothing for %s", attachment.filename)
-    return descriptions
+            descriptions.append(_fallback_attachment_description("no description could be generated"))
+            fallback_reasons.append("empty_description")
+    return AttachmentProcessingResult(
+        descriptions=descriptions,
+        fallback_count=len(fallback_reasons),
+        fallback_reasons=fallback_reasons,
+    )
 
 
 def _build_augmented_content(message: discord.Message, descriptions: list[str]) -> str:
@@ -348,7 +385,7 @@ class SandyPipeline:
         self._cache_seeded = False
         self._memory_worker_task: asyncio.Task | None = None
 
-    async def describe_attachments(self, message: discord.Message) -> list[str]:
+    async def describe_attachments(self, message: discord.Message) -> AttachmentProcessingResult:
         return await _describe_attachments(message, self.llm)
 
     async def send_reply(self, message: discord.Message, reply: str) -> int:
@@ -426,7 +463,7 @@ class SandyPipeline:
             )
             return None
 
-        logger.info(
+        logger.debug(
             "Dispatching tool %s with params %s",
             bouncer_result.recommended_tool,
             bouncer_result.tool_parameters or {},
@@ -449,6 +486,17 @@ class SandyPipeline:
             duration_ms=int((time.perf_counter() - tool_started) * 1000),
             tool_name=bouncer_result.recommended_tool,
             result_chars=len(tool_result or ""),
+        )
+        _forensic_event(
+            trace,
+            "tool_call",
+            tool_name=bouncer_result.recommended_tool,
+            arguments=bouncer_result.tool_parameters or {},
+            result=tool_result,
+            tool_context=_format_tool_context(
+                bouncer_result.recommended_tool,
+                tool_result,
+            ),
         )
         return _format_tool_context(
             bouncer_result.recommended_tool,
@@ -481,6 +529,13 @@ class SandyPipeline:
             duration_ms=int((time.perf_counter() - retrieval_started) * 1000),
             context_chars=len(rag_context or ""),
         )
+        _forensic_event(
+            trace,
+            "retrieval",
+            query_text=rag_query_text,
+            rag_context=rag_context,
+            ollama_history=ollama_history,
+        )
 
         # 7. Brain generation
         brain_started = time.perf_counter()
@@ -491,6 +546,7 @@ class SandyPipeline:
             channel_name=message.channel.name,
             rag_context=rag_context,
             tool_context=tool_context,
+            trace=trace,
         )
         self.trace_event(
             trace,
@@ -503,6 +559,13 @@ class SandyPipeline:
         # 8. Reply finalization / truncation cleanup
         reply = _finalize_reply(
             brain_response.content if brain_response else None,
+            done_reason=brain_response.done_reason if brain_response else None,
+        )
+        _forensic_event(
+            trace,
+            "reply_output",
+            raw_reply=brain_response.content if brain_response else None,
+            finalized_reply=reply,
             done_reason=brain_response.done_reason if brain_response else None,
         )
 
@@ -526,6 +589,12 @@ class SandyPipeline:
                 "reply_send_completed",
                 duration_ms=int((time.perf_counter() - send_started) * 1000),
                 reply_chars=len(reply),
+                message_parts=sent_parts,
+            )
+            _forensic_event(
+                trace,
+                "reply_delivery",
+                finalized_reply=reply,
                 message_parts=sent_parts,
             )
             logger.info(
@@ -556,6 +625,21 @@ class SandyPipeline:
             attachments=len(message.attachments),
             author_is_bot=message.author.bot,
         )
+        _forensic_event(
+            trace,
+            "turn_input",
+            raw_content=message.content,
+            resolved_content=resolve_mentions(message.content, message.mentions),
+            attachments=[
+                {
+                    "filename": attachment.filename,
+                    "content_type": attachment.content_type,
+                    "size_bytes": attachment.size,
+                }
+                for attachment in message.attachments
+            ],
+            mentions=[mention.display_name for mention in message.mentions],
+        )
 
         # 2. Registry refresh + human-readable ingress log
         self.background_tasks.create_task(
@@ -581,25 +665,40 @@ class SandyPipeline:
 
         # 4. Vision / attachment augmentation
         vision_started = time.perf_counter()
-        image_descriptions = await self.describe_attachments(message)
+        attachment_result = await self.describe_attachments(message)
         self.trace_event(
             trace,
             "vision_completed",
             duration_ms=int((time.perf_counter() - vision_started) * 1000),
-            image_count=len(image_descriptions),
+            image_count=len(attachment_result.descriptions),
+            fallback_images=attachment_result.fallback_count,
+            fallback_reasons=attachment_result.fallback_reasons or None,
         )
-        rag_query_text = self._add_message_to_cache(message, image_descriptions)
+        rag_query_text = self._add_message_to_cache(message, attachment_result.descriptions)
+        _forensic_event(
+            trace,
+            "vision_artifacts",
+            descriptions=attachment_result.descriptions,
+            fallback_count=attachment_result.fallback_count,
+            fallback_reasons=attachment_result.fallback_reasons or None,
+            rag_query_text=rag_query_text,
+        )
 
         # 5. Bouncer decision and deferred memory enqueue
         history = self.cache.get(message.guild.id, message.channel.id)
         bouncer_started = time.perf_counter()
-        bouncer_result = await self.llm.ask_bouncer(history.format(), bot_name=bot_user.display_name)
+        bouncer_result = await self.llm.ask_bouncer(
+            history.format(),
+            bot_name=bot_user.display_name,
+            trace=trace,
+        )
 
         logger.info(
-            "Bouncer → respond=%s tool=%s(%s)",
+            "Bouncer → respond=%s tool=%s(%s) reason=%r",
             bouncer_result.should_respond,
             bouncer_result.recommended_tool or "none",
             bouncer_result.use_tool,
+            getattr(bouncer_result, "reason", None),
         )
         self.trace_event(
             trace,
@@ -609,8 +708,13 @@ class SandyPipeline:
             use_tool=bouncer_result.use_tool,
             tool_name=bouncer_result.recommended_tool,
         )
+        _forensic_event(
+            trace,
+            "bouncer_context",
+            history_text=history.format(),
+        )
 
-        await self.memory_worker.enqueue(message, image_descriptions=image_descriptions)
+        await self.memory_worker.enqueue(message, image_descriptions=attachment_result.descriptions)
         self.trace_event(trace, "memory_enqueued", source="user_message")
 
         # 6-9. Tool -> RAG -> brain -> reply handling - see _run_reply_pipeline()
