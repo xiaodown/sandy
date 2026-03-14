@@ -79,7 +79,9 @@ MEMORY AND RECALL:
 TOOL RESULTS AND WEB SEARCHES:
 - If information from a tool call or web search appears below, it has ALREADY been retrieved. You already have the results. Do not narrate the act of searching or looking something up. Do not write things like "let me search for..." or "[search_web query: ...]" or "hang on let me look that up" — the lookup already happened and the results are right here.
 - Synthesize web search results naturally. Talk about what you found, not the act of finding it. No links, no result lists, no search narration.
-- Same for memory recalls — don't narrate the act of remembering. Just remember."""
+- Same for memory recalls — don't narrate the act of remembering. Just remember.
+- Do not invent specific facts about games, products, prices, release dates, features, reviews, or rankings unless those details are explicitly present in the information below.
+- If the information below only gives you a game title or a short storefront list, that is NOT enough grounding to describe the game's mechanics, story, genre details, or release date from memory. Say you don't know enough yet instead of making shit up."""
         now = datetime.now(_PACIFIC).strftime("%Y-%m-%d %H:%M %Z")
         #user = f"[{now}] [{server_name} / #{channel_name}]"
         user = f"""The current time is {now}.
@@ -153,6 +155,7 @@ Do not reject a message just because it is short. Short direct questions, short 
 If you decided YES to respond, also decide whether {bot_name} needs a tool to answer well.
 
 Use a tool ONLY when the conversation calls for information {bot_name} doesn't already have in the chat history. Do NOT recommend a tool if the answer is already visible in the conversation or if the message is casual chat that doesn't need outside information.
+Prefer the most specific tool available. If a Steam storefront question can be answered with steam_browse, use steam_browse instead of search_web.
 
 Available tools:
 
@@ -176,6 +179,13 @@ Available tools:
   Parameters: query (string, REQUIRED), n_results (int, default 5, max 10)
   Use when: someone asks about facts, news, current events, or anything requiring external knowledge.
   Query tips: write the query like a curious person would, not like a keyword dump. Prefer specific, natural phrases over generic terms. Bad: "AI bot interests". Good: "weird deep sea creatures discovered 2026" or "best horror movies this year".
+
+**steam_browse** — browse public Steam store categories.
+  Parameters: category (string, REQUIRED — one of top_sellers, specials, upcoming, new_releases), limit (int, default 5, max 10)
+  Use when: someone asks what's good on Steam, what's selling well, what's on sale, or what games are coming soon.
+  Category tips: use top_sellers for "what's hot" or "what's good", specials for sales/discounts, upcoming for unreleased games coming soon, and new_releases for fresh launches.
+  Follow-up rule: if the recent conversation is already clearly about Steam and the latest message says things like "what's on sale?", "what's good?", or "what's coming soon?" without repeating "Steam", still use steam_browse.
+  Scope rule: steam_browse is for storefront/category listings, not deep factual descriptions of one specific game. If someone asks for detailed facts about a specific game and those details are not already in context, prefer search_web.
 
 **get_current_time** — get the current date and time.
   Parameters: none

@@ -104,6 +104,8 @@ class MemoryWorker:
 def _format_tool_context(tool_name: str, result: str) -> str:
     if tool_name == "search_web":
         return f"## You just looked this up online\n{result}"
+    if tool_name == "steam_browse":
+        return f"## You just checked Steam\n{result}"
     if tool_name == "get_current_time":
         return f"## You just checked the time\n{result}"
     if tool_name == "dice_roll":

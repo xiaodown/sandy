@@ -20,6 +20,7 @@ import asyncio
 import logging
 import os
 import random
+import time
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -53,6 +54,22 @@ _SEARXNG_BASE = (
     f"http://{os.getenv('SEARXNG_HOST', '127.0.0.1')}"
     f":{os.getenv('SEARXNG_PORT', '8888')}"
 )
+_STEAM_FEATURED_URL = "https://store.steampowered.com/api/featuredcategories"
+_STEAM_CATEGORY_MAP: dict[str, str] = {
+    "top_sellers": "top_sellers",
+    "topsellers": "top_sellers",
+    "specials": "specials",
+    "on_sale": "specials",
+    "sale": "specials",
+    "upcoming": "coming_soon",
+    "coming_soon": "coming_soon",
+    "new_releases": "new_releases",
+    "new": "new_releases",
+}
+_STEAM_CACHE_TTL_SECONDS = int(os.getenv("STEAM_BROWSE_CACHE_TTL_SECONDS", "600"))
+_steam_featured_cache: dict[str, Any] | None = None
+_steam_featured_cache_expires_at = 0.0
+_steam_cache_lock = asyncio.Lock()
 
 _PACIFIC = ZoneInfo("America/Los_Angeles")
 
@@ -249,6 +266,107 @@ async def _handle_search_web(args: dict[str, Any]) -> str:
     return f"Web search results for '{query}':\n\n" + "\n\n".join(lines)
 
 
+async def _get_steam_featured_categories() -> dict[str, Any]:
+    global _steam_featured_cache
+    global _steam_featured_cache_expires_at
+
+    now = time.monotonic()
+    if _steam_featured_cache is not None and now < _steam_featured_cache_expires_at:
+        return _steam_featured_cache
+
+    async with _steam_cache_lock:
+        now = time.monotonic()
+        if _steam_featured_cache is not None and now < _steam_featured_cache_expires_at:
+            return _steam_featured_cache
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                _STEAM_FEATURED_URL,
+                params={"cc": "us", "l": "en"},
+                headers={"Accept": "application/json"},
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        _steam_featured_cache = data
+        _steam_featured_cache_expires_at = time.monotonic() + max(0, _STEAM_CACHE_TTL_SECONDS)
+        return data
+
+
+def _normalize_steam_category(category: str | None) -> str | None:
+    if not category:
+        return None
+    return _STEAM_CATEGORY_MAP.get(category.strip().lower())
+
+
+def _format_steam_price(item: dict[str, Any], *, category_key: str) -> str:
+    final_price = item.get("final_price")
+    original_price = item.get("original_price")
+    currency = item.get("currency") or "USD"
+    discount_percent = int(item.get("discount_percent") or 0)
+    if category_key == "coming_soon":
+        return "coming soon"
+    if final_price in (None, 0) and original_price in (None, 0):
+        return "free / price tbd"
+    if currency == "USD":
+        final_text = f"${final_price / 100:.2f}"
+        if original_price and discount_percent > 0:
+            original_text = f"${original_price / 100:.2f}"
+            return f"{final_text} (-{discount_percent}% from {original_text})"
+        return final_text
+    return str(final_price)
+
+
+def _format_steam_platforms(item: dict[str, Any]) -> str:
+    platforms = []
+    if item.get("windows_available"):
+        platforms.append("Win")
+    if item.get("mac_available"):
+        platforms.append("Mac")
+    if item.get("linux_available"):
+        platforms.append("Linux")
+    return ", ".join(platforms)
+
+
+async def _handle_steam_browse(args: dict[str, Any]) -> str:
+    category_key = _normalize_steam_category(args.get("category"))
+    if category_key is None:
+        return (
+            "Error: invalid Steam category. Use one of: "
+            "top_sellers, specials, upcoming, new_releases."
+        )
+
+    limit = min(max(int(args.get("limit", 5)), 1), 10)
+    try:
+        data = await _get_steam_featured_categories()
+    except Exception as exc:
+        logger.error("Steam browse error (category=%r): %s", category_key, exc)
+        return f"Error reaching Steam store data: {exc}"
+
+    bucket = data.get(category_key)
+    if not isinstance(bucket, dict):
+        return f"Error: Steam category '{category_key}' was not present in the response."
+
+    section_name = bucket.get("name", category_key.replace("_", " "))
+    items = bucket.get("items", [])[:limit]
+    if not items:
+        return f"No Steam entries found for category: {section_name}"
+
+    lines = []
+    for index, item in enumerate(items, 1):
+        app_id = item.get("id")
+        name = item.get("name", "(unknown)")
+        price = _format_steam_price(item, category_key=category_key)
+        platforms = _format_steam_platforms(item)
+        line = f"{index}. {name} — {price}"
+        if platforms:
+            line += f" [{platforms}]"
+        if app_id:
+            line += f"\n   https://store.steampowered.com/app/{app_id}"
+        lines.append(line)
+    return f"Steam {section_name}:\n\n" + "\n\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Tool schemas — passed verbatim to ollama as tools=
 #
@@ -386,7 +504,32 @@ TOOL_SCHEMAS: list[dict] = [
             },
         },
     },
-        {
+    {
+        "type": "function",
+        "function": {
+            "name": "steam_browse",
+            "description": (
+                "Browse public Steam store categories like top sellers, sales, upcoming releases, "
+                "or new releases. Use this when someone asks what's good on Steam, what's on sale, "
+                "or what's coming soon."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "description": "One of: top_sellers, specials, upcoming, new_releases",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "How many games to return (default 5, max 10)",
+                    },
+                },
+                "required": ["category"],
+            },
+        },
+    },
+    {
         "type": "function",
         "function": {
             "name": "dice_roll",
@@ -424,6 +567,7 @@ _HANDLERS: dict[str, Any] = {
     "search_memories":  _handle_search_memories,
     "get_current_time": _handle_get_current_time,
     "search_web":       _handle_search_web,
+    "steam_browse":     _handle_steam_browse,
     "dice_roll":        _handle_dice_roll,
 }
 
