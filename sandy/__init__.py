@@ -1,1 +1,1 @@
-"""Sandy — a Discord personality chatbot powered by local LLMs."""
+"""Sandy — a local Discord personality AI powered by local LLMs."""

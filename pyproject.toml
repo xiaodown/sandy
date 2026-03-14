@@ -5,7 +5,7 @@ exclude = ["data*", "history*", "build*", "*.egg-info*"]
 [project]
 name = "sandy"
 version = "0.2.0"
-description = "General purpose chatbot"
+description = "Local Discord personality AI with memory, tools, and observability"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
