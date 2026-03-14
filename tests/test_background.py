@@ -4,7 +4,8 @@ import asyncio
 
 import pytest
 
-from sandy.bot import BackgroundTaskSupervisor, MemoryWorker
+from sandy.bot import BackgroundTaskSupervisor
+from sandy.pipeline import MemoryWorker
 
 
 @pytest.mark.asyncio
