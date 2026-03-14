@@ -205,3 +205,16 @@ class VectorMemory:
         except Exception as exc:
             logger.error("VectorMemory.query failed: %s", exc)
             return ""
+
+    def delete_message(self, message_id: str) -> bool:
+        """Delete one vector-memory document by its Discord message snowflake."""
+        try:
+            existing = self._collection.get(ids=[message_id], include=[])
+            if not existing.get("ids"):
+                return False
+            self._collection.delete(ids=[message_id])
+            logger.info("VectorMemory.delete_message removed id=%s", message_id)
+            return True
+        except Exception as exc:
+            logger.error("VectorMemory.delete_message failed (id=%s): %s", message_id, exc)
+            raise

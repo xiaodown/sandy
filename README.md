@@ -157,6 +157,20 @@ Use `--test` with the CLI to read `TEST_DB_DIR` instead of `DB_DIR`:
 python -m sandy.logs --test recent
 ```
 
+## Maintenance
+
+For Recall/Chroma cleanup work:
+
+```bash
+source .venv/bin/activate
+python -m sandy.maintenance --test recall-find --query "steam"
+python -m sandy.maintenance --test delete-vector --discord-message-id 1482282320600891422
+python -m sandy.maintenance --test purge-vector-from-recall --query "Vault of the Vanquished" --yes
+```
+
+`recall-find` is the safe first step. It shows Recall rows plus any stored Discord
+message IDs so you can decide what to delete from vector memory.
+
 ## Data layout
 
 ```

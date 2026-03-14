@@ -84,6 +84,7 @@ async def test_process_and_store_skips_llm_and_vector_for_empty_content():
     await client.process_and_store(message)
 
     assert created_messages[0].content == "(no text content)"
+    assert created_messages[0].discord_message_id == message.id
     llm.ask_tagger.assert_not_awaited()
     llm.ask_summarizer.assert_not_awaited()
     vector_memory.add_message.assert_not_awaited()
@@ -161,6 +162,7 @@ async def test_process_and_store_keeps_recall_and_vector_calls_server_scoped():
     await client.process_and_store(message)
 
     assert created_messages[0].server_id == 777
+    assert created_messages[0].discord_message_id == message.id
     assert created_messages[0].server_name == "Private Guild"
     assert created_messages[0].channel_id == 888
     assert created_messages[0].channel_name == "secret"
