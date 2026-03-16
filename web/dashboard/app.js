@@ -9,6 +9,22 @@ const stageOrder = [
 ];
 const MAX_SERVER_NAMES = 4;
 const MAX_SERVER_NAME_CHARS = 22;
+const STAGE_LINGER_MS = 1000;
+const LATENCY_SEGMENTS = [
+  { key: "vision", label: "Vision", color: "#6c8ef5" },
+  { key: "bouncer", label: "Bouncer", color: "#d62828" },
+  { key: "tool", label: "Tool", color: "#e58f00" },
+  { key: "retrieval", label: "Memory", color: "#2a9d8f" },
+  { key: "brain", label: "Brain", color: "#6f42c1" },
+  { key: "send", label: "Send", color: "#1f8f4e" },
+  { key: "persist", label: "Persist", color: "#4d4d4d" }
+];
+let stagePresentation = {
+  stage: null,
+  seenAt: 0
+};
+const traceDetailCache = new Map();
+let latencyRefreshToken = 0;
 
 function el(id) {
   return document.getElementById(id);
@@ -45,6 +61,62 @@ function formatAgo(epochSeconds) {
   if (delta < 60) return `${delta}s ago`;
   if (delta < 3600) return `${Math.round(delta / 60)}m ago`;
   return `${Math.round(delta / 3600)}h ago`;
+}
+
+function formatDurationShort(ms) {
+  if (ms == null || Number.isNaN(Number(ms))) return "-";
+  const value = Number(ms);
+  if (value < 1000) return `${Math.round(value)}ms`;
+  return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}s`;
+}
+
+function formatChartTick(ms) {
+  if (ms >= 1000) {
+    return `${(ms / 1000).toFixed(ms >= 10000 ? 0 : 1)}s`;
+  }
+  return `${Math.round(ms)}ms`;
+}
+
+function traceStageGroup(stage) {
+  const normalized = String(stage || "").toLowerCase();
+  if (normalized.startsWith("vision")) return "vision";
+  if (normalized.startsWith("bouncer")) return "bouncer";
+  if (normalized.startsWith("tool")) return "tool";
+  if (normalized.startsWith("retrieval")) return "retrieval";
+  if (normalized.startsWith("brain")) return "brain";
+  if (normalized.startsWith("reply")) return "send";
+  if (normalized.startsWith("memory")) return "persist";
+  return null;
+}
+
+function stageDurationsFromDetail(detail) {
+  const totals = Object.fromEntries(LATENCY_SEGMENTS.map((segment) => [segment.key, 0]));
+  for (const event of detail?.timeline || []) {
+    const segmentKey = traceStageGroup(event.stage);
+    const durationMs = Number(event.duration_ms);
+    if (!segmentKey || !Number.isFinite(durationMs) || durationMs <= 0) {
+      continue;
+    }
+    totals[segmentKey] += durationMs;
+  }
+  return totals;
+}
+
+function formatBarLabel(turn) {
+  const date = new Date(turn.created_at);
+  if (Number.isNaN(date.getTime())) {
+    return turn.trace_id.slice(-4);
+  }
+  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function renderLatencyLegend() {
+  el("latency-legend").innerHTML = LATENCY_SEGMENTS.map((segment) => `
+    <div class="legend-item">
+      <span class="legend-swatch" style="background:${segment.color}"></span>
+      <span>${segment.label}</span>
+    </div>
+  `).join("");
 }
 
 function renderStatus(status) {
@@ -108,16 +180,25 @@ function renderStatus(status) {
 }
 
 function renderTrack(current) {
-  const currentStage = current?.stage || null;
+  const now = Date.now();
+  const actualStage = current?.stage || null;
+  if (actualStage) {
+    stagePresentation = { stage: actualStage, seenAt: now };
+  } else if (now - stagePresentation.seenAt > STAGE_LINGER_MS) {
+    stagePresentation = { stage: null, seenAt: 0 };
+  }
+
+  const currentStage = stagePresentation.stage;
   const container = el("racetrack");
   container.innerHTML = stageOrder.map((stage, index) => {
     const active = currentStage === stage.key;
     const pending = currentStage === null;
+    const lingering = !actualStage && active;
     return `
       <div class="stage-card ${active ? "is-active" : ""}">
         <div class="stage-step">T${index + 1}</div>
         <div class="stage-name">${stage.label}</div>
-        <div class="stage-meta">${stage.desc}<br>${pending ? "Waiting" : (active ? "Live now" : "Idle")}</div>
+        <div class="stage-meta">${stage.desc}<br>${pending ? "Waiting" : (active ? (lingering ? "Just now" : "Live now") : "Idle")}</div>
       </div>
     `;
   }).join("");
@@ -183,6 +264,97 @@ function renderRecent(payload) {
   tbody.querySelectorAll("tr[data-trace-id]").forEach((row) => {
     row.addEventListener("click", () => loadTrace(row.dataset.traceId));
   });
+}
+
+function renderLatencyChart(turns, detailsByTraceId) {
+  const container = el("latency-chart");
+  const chartTurns = turns
+    .filter((turn) => !turn.author_is_bot)
+    .slice(0, 12)
+    .reverse();
+
+  if (!chartTurns.length) {
+    container.innerHTML = `<div class="detail-empty">No recent human turns to chart yet.</div>`;
+    return;
+  }
+
+  const bars = chartTurns.map((turn) => {
+    const detail = detailsByTraceId.get(turn.trace_id);
+    const segments = detail ? stageDurationsFromDetail(detail) : null;
+    const totalMs = segments
+      ? LATENCY_SEGMENTS.reduce((sum, segment) => sum + segments[segment.key], 0)
+      : Number(turn.duration_ms || 0);
+    return {
+      turn,
+      segments,
+      totalMs,
+      label: formatBarLabel(turn)
+    };
+  }).filter((bar) => bar.totalMs > 0);
+
+  if (!bars.length) {
+    container.innerHTML = `<div class="detail-empty">Recent turns do not have usable stage timings yet.</div>`;
+    return;
+  }
+
+  const maxTotal = Math.max(...bars.map((bar) => bar.totalMs), 1);
+  const width = 760;
+  const height = 280;
+  const margin = { top: 18, right: 16, bottom: 54, left: 54 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const gap = 12;
+  const barWidth = Math.max(20, (plotWidth - gap * (bars.length - 1)) / bars.length);
+  const tickValues = [0, 0.25, 0.5, 0.75, 1].map((ratio) => Math.round(maxTotal * ratio));
+
+  const gridLines = tickValues.map((tick) => {
+    const y = margin.top + plotHeight - (tick / maxTotal) * plotHeight;
+    return `
+      <line class="latency-grid-line" x1="${margin.left}" y1="${y}" x2="${width - margin.right}" y2="${y}"></line>
+      <text class="latency-axis-label" x="${margin.left - 8}" y="${y + 4}" text-anchor="end">${formatChartTick(tick)}</text>
+    `;
+  }).join("");
+
+  const barGroups = bars.map((bar, index) => {
+    const x = margin.left + index * (barWidth + gap);
+    let offsetY = margin.top + plotHeight;
+    const rects = [];
+    for (const segment of LATENCY_SEGMENTS) {
+      const durationMs = bar.segments?.[segment.key] || 0;
+      if (!durationMs) continue;
+      const segmentHeight = (durationMs / maxTotal) * plotHeight;
+      offsetY -= segmentHeight;
+      rects.push(`
+        <rect
+          x="${x}"
+          y="${offsetY}"
+          width="${barWidth}"
+          height="${segmentHeight}"
+          rx="6"
+          ry="6"
+          fill="${segment.color}">
+          <title>${segment.label}: ${formatDurationShort(durationMs)}</title>
+        </rect>
+      `);
+    }
+    const centerX = x + barWidth / 2;
+    const totalY = margin.top + plotHeight - (bar.totalMs / maxTotal) * plotHeight - 8;
+    return `
+      <g>
+        ${rects.join("")}
+        <text class="latency-bar-total" x="${centerX}" y="${Math.max(margin.top + 10, totalY)}" text-anchor="middle">${formatDurationShort(bar.totalMs)}</text>
+        <text class="latency-bar-label" x="${centerX}" y="${height - 18}" text-anchor="middle">${escapeHtml(bar.label)}</text>
+      </g>
+    `;
+  }).join("");
+
+  container.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Recent turn latency breakdown by pipeline stage">
+      ${gridLines}
+      <line class="latency-axis-line" x1="${margin.left}" y1="${margin.top + plotHeight}" x2="${width - margin.right}" y2="${margin.top + plotHeight}"></line>
+      ${barGroups}
+    </svg>
+  `;
 }
 
 function renderDetail(detail) {
@@ -268,20 +440,56 @@ async function refreshRecent() {
   try {
     const recent = await fetchJson("/api/turns/recent?limit=12");
     renderRecent(recent);
+    await refreshLatencyChart(recent.turns || []);
   } catch (error) {
     el("recent-turns").innerHTML = `<tr><td colspan="7" class="detail-empty">${escapeHtml(error.message)}</td></tr>`;
+    el("latency-chart").innerHTML = `<div class="detail-empty">${escapeHtml(error.message)}</div>`;
   }
 }
 
 async function loadTrace(traceId) {
   try {
-    const detail = await fetchJson(`/api/turns/${traceId}`);
+    const detail = await fetchTraceDetail(traceId);
     renderDetail(detail);
   } catch (error) {
     openTraceModal();
     el("detail-trace-note").textContent = "Trace detail failed";
     el("detail-pane").className = "detail-empty";
     el("detail-pane").textContent = error.message;
+  }
+}
+
+async function fetchTraceDetail(traceId) {
+  if (traceDetailCache.has(traceId)) {
+    return traceDetailCache.get(traceId);
+  }
+  const detail = await fetchJson(`/api/turns/${traceId}`);
+  traceDetailCache.set(traceId, detail);
+  return detail;
+}
+
+async function refreshLatencyChart(turns) {
+  const token = ++latencyRefreshToken;
+  const chartTurns = (turns || [])
+    .filter((turn) => !turn.author_is_bot)
+    .slice(0, 12);
+
+  if (!chartTurns.length) {
+    renderLatencyChart([], new Map());
+    return;
+  }
+
+  try {
+    await Promise.all(chartTurns.map((turn) => fetchTraceDetail(turn.trace_id)));
+    if (token !== latencyRefreshToken) {
+      return;
+    }
+    renderLatencyChart(chartTurns, traceDetailCache);
+  } catch (error) {
+    if (token !== latencyRefreshToken) {
+      return;
+    }
+    el("latency-chart").innerHTML = `<div class="detail-empty">${escapeHtml(error.message)}</div>`;
   }
 }
 
@@ -293,6 +501,7 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+renderLatencyLegend();
 refreshStatus();
 refreshRecent();
 setInterval(refreshStatus, 1200);

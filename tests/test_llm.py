@@ -2,6 +2,7 @@ from sandy.llm import (
     BouncerResponse,
     _coerce_bouncer_tool_selection,
     _infer_steam_browse_category,
+    _looks_like_direct_image_ask,
 )
 
 
@@ -69,3 +70,36 @@ def test_coerce_bouncer_leaves_specific_game_lookup_alone():
 
     assert coerced.recommended_tool == "search_web"
     assert coerced.tool_parameters == {"query": "Vault of the Vanquished release date"}
+
+
+def test_looks_like_direct_image_ask_requires_bot_name_and_picture_language():
+    context = "\n".join(
+        [
+            "[20s ago] [alice] random chatter",
+            "[just now] [alice] hey sandy, can you tell me what you think of this picture?",
+        ]
+    )
+
+    assert _looks_like_direct_image_ask(context, bot_name="Sandy") is True
+    assert _looks_like_direct_image_ask(context, bot_name="OtherBot") is False
+
+
+def test_coerce_bouncer_no_respond_to_true_for_direct_image_ask():
+    context = "\n".join(
+        [
+            "[20s ago] [alice] hi",
+            "[just now] [alice] hey sandy, can you tell me what you think of this image?",
+        ]
+    )
+    result = BouncerResponse(
+        should_respond=False,
+        reason="model got it wrong",
+        use_tool=False,
+        recommended_tool=None,
+        tool_parameters=None,
+    )
+
+    coerced = _coerce_bouncer_tool_selection(context, result, bot_name="Sandy")
+
+    assert coerced.should_respond is True
+    assert "attached image or picture" in coerced.reason

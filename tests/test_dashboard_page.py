@@ -9,3 +9,4 @@ def test_dashboard_page_contains_expected_endpoints() -> None:
     assert "/dashboard/images/v3.png" in html
     assert "/dashboard/styles.css" in html
     assert "/dashboard/app.js" in html
+    assert "Latency Breakdown" in html

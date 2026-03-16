@@ -40,6 +40,16 @@ load_dotenv()
 logger = get_logger(__name__)
 
 _HISTORY_LINE_RE = re.compile(r"^\[[^\]]+\] \[[^\]]+\] (?P<content>.*)$")
+_IMAGE_ASK_PATTERNS: tuple[str, ...] = (
+    "this picture",
+    "this image",
+    "that picture",
+    "that image",
+    "look at this",
+    "look at that",
+    "what do you think of this",
+    "what do you think of that",
+)
 _STEAM_CATEGORY_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("specials", ("on sale", "sales", "sale", "discount", "discounts")),
     ("upcoming", ("coming soon", "upcoming")),
@@ -193,11 +203,41 @@ def _infer_steam_browse_category(context: str) -> str | None:
     return None
 
 
+def _looks_like_direct_image_ask(context: str, *, bot_name: str) -> bool:
+    messages = _extract_history_messages(context)
+    if not messages:
+        return False
+
+    latest = messages[-1].lower()
+    bot_name_lower = bot_name.strip().lower()
+    if not bot_name_lower:
+        return False
+
+    if bot_name_lower not in latest:
+        return False
+    if not any(pattern in latest for pattern in _IMAGE_ASK_PATTERNS):
+        return False
+    return "?" in latest or "think" in latest or "look" in latest
+
+
 def _coerce_bouncer_tool_selection(
     context: str,
     result: "BouncerResponse",
+    *,
+    bot_name: str = "Sandy",
 ) -> "BouncerResponse":
     """Apply deterministic tool overrides for obvious storefront asks."""
+    if (
+        not result.should_respond
+        and _looks_like_direct_image_ask(context, bot_name=bot_name)
+    ):
+        logger.info("Bouncer image-ask override: forcing should_respond=True")
+        result.should_respond = True
+        result.reason = (
+            "Deterministic override: latest message directly asks "
+            f"{bot_name} about an attached image or picture."
+        )
+
     if not result.should_respond:
         return result
     if result.use_tool and result.recommended_tool not in {None, "search_web", "steam_browse"}:
@@ -381,7 +421,7 @@ class OllamaInterface:
                 )
             raw_response = response.message.content or ""
             result = BouncerResponse.model_validate_json(raw_response)
-            result = _coerce_bouncer_tool_selection(context, result)
+            result = _coerce_bouncer_tool_selection(context, result, bot_name=bot_name)
             # If she's not responding, tool fields are meaningless — zero them.
             if not result.should_respond:
                 result.use_tool = False
