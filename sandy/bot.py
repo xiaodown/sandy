@@ -26,6 +26,7 @@ from .pipeline import (
     _trace_event,
     build_pipeline,
 )
+from .runtime_state import RuntimeState
 
 load_dotenv()
 
@@ -71,13 +72,21 @@ class BackgroundTaskSupervisor:
 
 
 background_tasks = BackgroundTaskSupervisor()
-pipeline = build_pipeline(background_tasks=background_tasks)
+runtime_state = RuntimeState()
+pipeline = build_pipeline(background_tasks=background_tasks, runtime_state=runtime_state)
 
 
 @bot.event
 async def on_ready():
     """Event handler for when the bot is ready."""
+    runtime_state.set_discord_connected(True, user_name=bot.user.name if bot.user else None)
     await pipeline.on_ready(bot)
+
+
+@bot.event
+async def on_disconnect():
+    """Event handler for Discord disconnects."""
+    runtime_state.set_discord_connected(False)
 
 
 @bot.event

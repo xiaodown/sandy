@@ -12,6 +12,7 @@ import os
 
 from dotenv import load_dotenv
 
+from .api import ApiServer, ApiService, api_enabled, api_host, api_port
 from .health import collect_health_report, log_startup_report
 
 # Parse args BEFORE importing .bot — bot.py reads DB_DIR and DISCORD_API_KEY
@@ -53,9 +54,20 @@ async def _main() -> int:
         return 1
 
     # Import the Discord stack only after startup prerequisites are satisfied.
-    from .bot import bot, DISCORD_API_KEY, logger, pipeline, shutdown_background_work  # noqa: E402
+    from .bot import bot, DISCORD_API_KEY, logger, pipeline, runtime_state, shutdown_background_work  # noqa: E402
 
+    api_server: ApiServer | None = None
     try:
+        if api_enabled():
+            api_server = ApiServer(
+                ApiService(pipeline=pipeline, runtime_state=runtime_state, test_mode=args.test),
+                host=api_host(),
+                port=api_port(),
+            )
+            api_server.start()
+            host, port = api_server.address
+            logger.info("Observability API listening on http://%s:%d", host, port)
+
         prewarm_enabled = os.getenv("PREWARM_MODEL") == "True"
         prewarm_model_name = os.getenv("PREWARM_MODEL_NAME")
         if prewarm_enabled and prewarm_model_name:
@@ -69,6 +81,8 @@ async def _main() -> int:
         logger.error("Fatal: %s", exc)
         return 1
     finally:
+        if api_server is not None:
+            api_server.shutdown()
         await shutdown_background_work()
         await bot.close()
     return 0

@@ -152,6 +152,33 @@ Startup now uses the same check logic with a hard/soft split:
 
 That split is deliberate. Sandy should not stay dead just because an optional dependency is temporarily unhealthy.
 
+## Observability API
+
+Sandy now exposes a small read-only local API for dashboards and operator views.
+By default it listens on `127.0.0.1:8765`.
+
+Endpoints:
+
+```bash
+curl http://127.0.0.1:8765/api/status
+curl http://127.0.0.1:8765/api/gpu
+curl 'http://127.0.0.1:8765/api/turns/recent?limit=10'
+curl http://127.0.0.1:8765/api/turns/<trace_id>
+```
+
+Current scope is intentionally small:
+
+- `/api/status` — Discord connected state, current active turn/stage, memory-worker state, LLM busy/idle, last bouncer decision
+- `/api/gpu` — GPU telemetry via `nvidia-smi` when available
+- `/api/turns/recent` — recent turn summaries for list views
+- `/api/turns/<trace_id>` — one trace with timeline + forensic artifacts for drill-down
+
+Config lives in `.env`:
+
+- `SANDY_API_ENABLED=true`
+- `SANDY_API_HOST=127.0.0.1`
+- `SANDY_API_PORT=8765`
+
 ## Inspecting logs
 
 Sandy stores:

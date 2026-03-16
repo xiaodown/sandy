@@ -33,6 +33,7 @@ from .memory import MemoryClient
 from .paths import resolve_runtime_path
 from .recall import ChatDatabase
 from .registry import Registry
+from .runtime_state import RuntimeState
 from .trace import TurnTrace, event_payload, forensic_payload
 from .vector_memory import VectorMemory
 
@@ -66,8 +67,9 @@ class MemoryWorker:
 
     _SENTINEL = object()
 
-    def __init__(self, handler) -> None:
+    def __init__(self, handler, *, runtime_state: RuntimeState | None = None) -> None:
         self._handler = handler
+        self._runtime_state = runtime_state
         self._queue: asyncio.Queue[object] = asyncio.Queue()
         self._closed = False
 
@@ -81,10 +83,19 @@ class MemoryWorker:
                     return
 
                 message, image_descriptions = item
+                if self._runtime_state is not None:
+                    self._runtime_state.memory_processing_started(
+                        message_id=getattr(message, "id", None),
+                    )
                 try:
                     await self._handler(message, image_descriptions=image_descriptions)
                 except Exception:
                     logger.exception("Memory worker handler failed for message %s", getattr(message, "id", "?"))
+                finally:
+                    if self._runtime_state is not None:
+                        self._runtime_state.memory_processing_finished(
+                            message_id=getattr(message, "id", None),
+                        )
             finally:
                 self._queue.task_done()
 
@@ -96,6 +107,8 @@ class MemoryWorker:
         if self._closed:
             raise RuntimeError("Memory worker is closed")
         await self._queue.put((message, image_descriptions))
+        if self._runtime_state is not None:
+            self._runtime_state.memory_enqueued()
 
     async def shutdown(self) -> None:
         if self._closed:
@@ -376,6 +389,7 @@ class SandyPipeline:
         recall_db: ChatDatabase,
         memory: MemoryClient,
         memory_worker: MemoryWorker,
+        runtime_state: RuntimeState,
         tools_module=tools,
         trace_event=_trace_event,
     ) -> None:
@@ -387,6 +401,7 @@ class SandyPipeline:
         self.recall_db = recall_db
         self.memory = memory
         self.memory_worker = memory_worker
+        self.runtime_state = runtime_state
         self.tools_module = tools_module
         self.trace_event = trace_event
         self._cache_seeded = False
@@ -476,6 +491,7 @@ class SandyPipeline:
             bouncer_result.tool_parameters or {},
         )
         tool_started = time.perf_counter()
+        self.runtime_state.update_turn_stage(trace, "tool_started")
         self.trace_event(
             trace,
             "tool_started",
@@ -526,6 +542,7 @@ class SandyPipeline:
         # 6. Semantic retrieval (RAG)
         ollama_history = history.to_ollama_messages(bot_user.id)
         if bouncer_result.recommended_tool in _RAG_BYPASS_TOOLS:
+            self.runtime_state.update_turn_stage(trace, "retrieval_skipped")
             rag_context = ""
             self.trace_event(
                 trace,
@@ -544,6 +561,7 @@ class SandyPipeline:
             )
         else:
             retrieval_started = time.perf_counter()
+            self.runtime_state.update_turn_stage(trace, "retrieval")
             rag_context = await self.vector_memory.query(
                 rag_query_text,
                 server_id=message.guild.id,
@@ -564,6 +582,7 @@ class SandyPipeline:
 
         # 7. Brain generation
         brain_started = time.perf_counter()
+        self.runtime_state.update_turn_stage(trace, "brain")
         brain_response = await self.llm.ask_brain(
             ollama_history,
             bot_name=bot_user.display_name,
@@ -607,6 +626,7 @@ class SandyPipeline:
         try:
             # 9. Reply send
             send_started = time.perf_counter()
+            self.runtime_state.update_turn_stage(trace, "reply_send")
             self.trace_event(trace, "reply_send_started", reply_chars=len(reply))
             sent_parts = await self.send_reply(message, reply)
             self.trace_event(
@@ -644,133 +664,149 @@ class SandyPipeline:
         trace = TurnTrace.from_message(message)
         turn_started = time.perf_counter()
         replied = False
+        self.runtime_state.begin_turn(trace, author_is_bot=message.author.bot)
 
-        # 1. Turn intake / trace bootstrap
-        self.trace_event(
-            trace,
-            "message_received",
-            content_chars=len(message.content or ""),
-            attachments=len(message.attachments),
-            author_is_bot=message.author.bot,
-        )
-        _forensic_event(
-            trace,
-            "turn_input",
-            raw_content=message.content,
-            resolved_content=resolve_mentions(message.content, message.mentions),
-            attachments=[
-                {
-                    "filename": attachment.filename,
-                    "content_type": attachment.content_type,
-                    "size_bytes": attachment.size,
-                }
-                for attachment in message.attachments
-            ],
-            mentions=[mention.display_name for mention in message.mentions],
-        )
+        try:
+            # 1. Turn intake / trace bootstrap
+            self.trace_event(
+                trace,
+                "message_received",
+                content_chars=len(message.content or ""),
+                attachments=len(message.attachments),
+                author_is_bot=message.author.bot,
+            )
+            _forensic_event(
+                trace,
+                "turn_input",
+                raw_content=message.content,
+                resolved_content=resolve_mentions(message.content, message.mentions),
+                attachments=[
+                    {
+                        "filename": attachment.filename,
+                        "content_type": attachment.content_type,
+                        "size_bytes": attachment.size,
+                    }
+                    for attachment in message.attachments
+                ],
+                mentions=[mention.display_name for mention in message.mentions],
+            )
 
-        # 2. Registry refresh + human-readable ingress log
-        self.background_tasks.create_task(
-            asyncio.to_thread(self.registry.ensure_seen, message),
-            name=f"registry.ensure_seen:{message.id}",
-        )
-        self._log_message_received(message)
+            # 2. Registry refresh + human-readable ingress log
+            self.background_tasks.create_task(
+                asyncio.to_thread(self.registry.ensure_seen, message),
+                name=f"registry.ensure_seen:{message.id}",
+            )
+            self._log_message_received(message)
 
-        # 3. Bot messages short-circuit after cache + memory enqueue
-        if message.author.bot:
-            logger.debug("Bot message from %s — storing and skipping pipeline", message.author.display_name)
-            self.cache.add(message)
-            await self.memory_worker.enqueue(message)
-            self.trace_event(trace, "memory_enqueued", source="bot_message")
+            # 3. Bot messages short-circuit after cache + memory enqueue
+            if message.author.bot:
+                self.runtime_state.update_turn_stage(trace, "memory_enqueue")
+                logger.debug("Bot message from %s — storing and skipping pipeline", message.author.display_name)
+                self.cache.add(message)
+                await self.memory_worker.enqueue(message)
+                self.trace_event(trace, "memory_enqueued", source="bot_message")
+                self.trace_event(
+                    trace,
+                    "turn_completed",
+                    duration_ms=int((time.perf_counter() - turn_started) * 1000),
+                    replied=False,
+                    bot_message=True,
+                )
+                return
+
+            # 4. Vision / attachment augmentation
+            vision_started = time.perf_counter()
+            self.runtime_state.update_turn_stage(trace, "vision")
+            attachment_result = await self.describe_attachments(message)
+            self.trace_event(
+                trace,
+                "vision_completed",
+                duration_ms=int((time.perf_counter() - vision_started) * 1000),
+                image_count=len(attachment_result.descriptions),
+                fallback_images=attachment_result.fallback_count,
+                fallback_reasons=attachment_result.fallback_reasons or None,
+            )
+            rag_query_text = self._add_message_to_cache(message, attachment_result.descriptions)
+            _forensic_event(
+                trace,
+                "vision_artifacts",
+                descriptions=attachment_result.descriptions,
+                fallback_count=attachment_result.fallback_count,
+                fallback_reasons=attachment_result.fallback_reasons or None,
+                rag_query_text=rag_query_text,
+            )
+
+            # 5. Bouncer decision and deferred memory enqueue
+            history = self.cache.get(message.guild.id, message.channel.id)
+            bouncer_started = time.perf_counter()
+            self.runtime_state.update_turn_stage(trace, "bouncer")
+            bouncer_result = await self.llm.ask_bouncer(
+                history.format(),
+                bot_name=bot_user.display_name,
+                trace=trace,
+            )
+
+            logger.info(
+                "Bouncer → respond=%s tool=%s(%s) reason=%r",
+                bouncer_result.should_respond,
+                bouncer_result.recommended_tool or "none",
+                bouncer_result.use_tool,
+                getattr(bouncer_result, "reason", None),
+            )
+            self.runtime_state.set_last_bouncer_decision(
+                trace_id=trace.trace_id,
+                should_respond=bouncer_result.should_respond,
+                use_tool=bouncer_result.use_tool,
+                tool_name=bouncer_result.recommended_tool,
+            )
+            self.trace_event(
+                trace,
+                "bouncer_completed",
+                duration_ms=int((time.perf_counter() - bouncer_started) * 1000),
+                should_respond=bouncer_result.should_respond,
+                use_tool=bouncer_result.use_tool,
+                tool_name=bouncer_result.recommended_tool,
+            )
+            _forensic_event(
+                trace,
+                "bouncer_context",
+                history_text=history.format(),
+            )
+
+            self.runtime_state.update_turn_stage(trace, "memory_enqueue")
+            await self.memory_worker.enqueue(message, image_descriptions=attachment_result.descriptions)
+            self.trace_event(trace, "memory_enqueued", source="user_message")
+
+            # 6-9. Tool -> RAG -> brain -> reply handling - see _run_reply_pipeline()
+            if bouncer_result.should_respond:
+                async with message.channel.typing():
+                    replied = await self._run_reply_pipeline(
+                        message,
+                        bot_user=bot_user,
+                        trace=trace,
+                        history=history,
+                        rag_query_text=rag_query_text,
+                        bouncer_result=bouncer_result,
+                    )
+
+            # 10. Turn completion
+            self.runtime_state.update_turn_stage(trace, "turn_completed")
             self.trace_event(
                 trace,
                 "turn_completed",
                 duration_ms=int((time.perf_counter() - turn_started) * 1000),
-                replied=False,
-                bot_message=True,
+                replied=replied,
             )
-            return
-
-        # 4. Vision / attachment augmentation
-        vision_started = time.perf_counter()
-        attachment_result = await self.describe_attachments(message)
-        self.trace_event(
-            trace,
-            "vision_completed",
-            duration_ms=int((time.perf_counter() - vision_started) * 1000),
-            image_count=len(attachment_result.descriptions),
-            fallback_images=attachment_result.fallback_count,
-            fallback_reasons=attachment_result.fallback_reasons or None,
-        )
-        rag_query_text = self._add_message_to_cache(message, attachment_result.descriptions)
-        _forensic_event(
-            trace,
-            "vision_artifacts",
-            descriptions=attachment_result.descriptions,
-            fallback_count=attachment_result.fallback_count,
-            fallback_reasons=attachment_result.fallback_reasons or None,
-            rag_query_text=rag_query_text,
-        )
-
-        # 5. Bouncer decision and deferred memory enqueue
-        history = self.cache.get(message.guild.id, message.channel.id)
-        bouncer_started = time.perf_counter()
-        bouncer_result = await self.llm.ask_bouncer(
-            history.format(),
-            bot_name=bot_user.display_name,
-            trace=trace,
-        )
-
-        logger.info(
-            "Bouncer → respond=%s tool=%s(%s) reason=%r",
-            bouncer_result.should_respond,
-            bouncer_result.recommended_tool or "none",
-            bouncer_result.use_tool,
-            getattr(bouncer_result, "reason", None),
-        )
-        self.trace_event(
-            trace,
-            "bouncer_completed",
-            duration_ms=int((time.perf_counter() - bouncer_started) * 1000),
-            should_respond=bouncer_result.should_respond,
-            use_tool=bouncer_result.use_tool,
-            tool_name=bouncer_result.recommended_tool,
-        )
-        _forensic_event(
-            trace,
-            "bouncer_context",
-            history_text=history.format(),
-        )
-
-        await self.memory_worker.enqueue(message, image_descriptions=attachment_result.descriptions)
-        self.trace_event(trace, "memory_enqueued", source="user_message")
-
-        # 6-9. Tool -> RAG -> brain -> reply handling - see _run_reply_pipeline()
-        if bouncer_result.should_respond:
-            async with message.channel.typing():
-                replied = await self._run_reply_pipeline(
-                    message,
-                    bot_user=bot_user,
-                    trace=trace,
-                    history=history,
-                    rag_query_text=rag_query_text,
-                    bouncer_result=bouncer_result,
-                )
-
-        # 10. Turn completion
-        self.trace_event(
-            trace,
-            "turn_completed",
-            duration_ms=int((time.perf_counter() - turn_started) * 1000),
-            replied=replied,
-        )
+        finally:
+            self.runtime_state.end_turn(trace.trace_id)
 
     async def shutdown(self) -> None:
         await self.memory_worker.shutdown()
 
 
-def build_pipeline(background_tasks, *, trace_event=_trace_event) -> SandyPipeline:
+def build_pipeline(background_tasks, *, trace_event=_trace_event, runtime_state: RuntimeState | None = None) -> SandyPipeline:
     """Construct Sandy's pipeline with the default production dependencies."""
+    runtime_state = runtime_state or RuntimeState()
     registry = Registry()
     cache = Last10(maxlen=10, registry=registry)
     llm = OllamaInterface()
@@ -787,7 +823,7 @@ def build_pipeline(background_tasks, *, trace_event=_trace_event) -> SandyPipeli
         llm=llm,
         vector_memory=vector_memory,
     )
-    memory_worker = MemoryWorker(memory.process_and_store)
+    memory_worker = MemoryWorker(memory.process_and_store, runtime_state=runtime_state)
 
     return SandyPipeline(
         background_tasks=background_tasks,
@@ -798,6 +834,7 @@ def build_pipeline(background_tasks, *, trace_event=_trace_event) -> SandyPipeli
         recall_db=recall_db,
         memory=memory,
         memory_worker=memory_worker,
+        runtime_state=runtime_state,
         tools_module=tools,
         trace_event=trace_event,
     )

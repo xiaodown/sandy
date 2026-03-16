@@ -261,6 +261,10 @@ class OllamaInterface:
         # the brain without delaying the user.
         self._lock = asyncio.Lock()
 
+    def is_busy(self) -> bool:
+        """Return whether an Ollama request currently holds the shared lock."""
+        return self._lock.locked()
+
     # ------------------------------------------------------------------
     # Health check
     # ------------------------------------------------------------------

@@ -241,6 +241,11 @@ There is also a Pydantic `model_validator` on `BouncerResponse` that forces `use
   - console: colored, directional runtime logs
   - JSONL: full forensic artifacts
   - SQLite: compact trace timeline
+- There is now a small read-only local observability API for dashboards and operator views:
+  - `/api/status`
+  - `/api/gpu`
+  - `/api/turns/recent`
+  - `/api/turns/<trace_id>`
 - Inspection CLIs:
   - `python -m sandy.logs recent`
   - `python -m sandy.logs show <trace_id>`

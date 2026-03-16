@@ -166,6 +166,81 @@ def _summarize_recent_turns(
     return results
 
 
+def get_recent_turns(*, test_mode: bool, limit: int = 10, human_only: bool = False) -> list[dict[str, Any]]:
+    paths = _resolve_paths(test_mode=test_mode)
+    if not paths.trace_db_path.exists() or not paths.jsonl_path.exists():
+        return []
+    records = _load_jsonl_records(paths.jsonl_path)
+    forensic_records = _forensic_map(records)
+    with _connect_trace_db(paths.trace_db_path) as conn:
+        return _summarize_recent_turns(
+            conn,
+            forensic_records,
+            limit=limit,
+            human_only=human_only,
+        )
+
+
+def get_trace_detail(*, test_mode: bool, trace_id: str) -> dict[str, Any] | None:
+    paths = _resolve_paths(test_mode=test_mode)
+    if not paths.trace_db_path.exists() or not paths.jsonl_path.exists():
+        return None
+
+    records = _load_jsonl_records(paths.jsonl_path)
+    records_by_trace = _index_records_by_trace(records)
+    if trace_id not in records_by_trace:
+        return None
+
+    with _connect_trace_db(paths.trace_db_path) as conn:
+        trace_events = [
+            json.loads(row["payload_json"])
+            for row in conn.execute(
+                """
+                SELECT payload_json
+                FROM trace_events
+                WHERE trace_id = ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (trace_id,),
+            ).fetchall()
+        ]
+        forensic: dict[str, dict[str, Any]] = {}
+        for record in records_by_trace.get(trace_id, []):
+            if record.get("record_type") == "forensic":
+                payload = record["forensic"]
+                forensic[payload["artifact"]] = payload
+
+        turn_input = forensic.get("turn_input", {})
+        turn_row = conn.execute(
+            """
+            SELECT payload_json
+            FROM trace_events
+            WHERE trace_id = ? AND stage = 'turn_completed'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (trace_id,),
+        ).fetchone()
+        turn_payload = json.loads(turn_row["payload_json"]) if turn_row else {}
+
+    return {
+        "trace_id": trace_id,
+        "turn_input": turn_input,
+        "timeline": trace_events,
+        "turn_completed": turn_payload,
+        "artifacts": {
+            "bouncer_decision": forensic.get("bouncer_decision", {}),
+            "bouncer_context": forensic.get("bouncer_context", {}),
+            "vision_artifacts": forensic.get("vision_artifacts", {}),
+            "tool_call": forensic.get("tool_call", {}),
+            "retrieval": forensic.get("retrieval", {}),
+            "brain_generation": forensic.get("brain_generation", {}),
+            "reply_output": forensic.get("reply_output", {}),
+            "reply_delivery": forensic.get("reply_delivery", {}),
+        },
+    }
+
+
 def _print_recent(turns: list[dict[str, Any]]) -> None:
     if not turns:
         print("No recent turns found.")
