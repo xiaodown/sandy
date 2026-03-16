@@ -3,7 +3,8 @@
 *.log
 notes
 .env
-data/*
+data/
+sandy/data/
 *.swp
 handover*
 .python-version
