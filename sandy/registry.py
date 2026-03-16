@@ -17,6 +17,8 @@ import logging
 import discord
 from dotenv import load_dotenv
 
+from .paths import resolve_runtime_path
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -29,11 +31,8 @@ class Registry:
     """
 
     def __init__(self):
-        dbpath = os.path.join(
-            os.getenv("DB_DIR", "data/prod/"),
-            os.getenv("SERVER_DB_NAME", "server.db"),
-        )
-        self.db_path = dbpath
+        db_dir = resolve_runtime_path(os.getenv("DB_DIR", "data/prod/"))
+        self.db_path = str(db_dir / os.getenv("SERVER_DB_NAME", "server.db"))
         self._initialize_db()
 
     def _get_conn(self) -> sqlite3.Connection:

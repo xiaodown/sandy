@@ -36,6 +36,8 @@ import chromadb
 import ollama
 from dotenv import load_dotenv
 
+from .paths import resolve_runtime_path
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -74,8 +76,8 @@ class VectorMemory:
     """
 
     def __init__(self) -> None:
-        db_dir = os.getenv("DB_DIR", "data/prod/").rstrip("/\\") or "data/prod"
-        chroma_path = Path(db_dir) / "chroma"
+        db_dir = resolve_runtime_path(os.getenv("DB_DIR", "data/prod/"))
+        chroma_path = db_dir / "chroma"
         chroma_path.mkdir(parents=True, exist_ok=True)
         try:
             self._chroma = chromadb.PersistentClient(path=str(chroma_path))

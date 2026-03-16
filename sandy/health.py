@@ -24,6 +24,7 @@ import httpx
 import ollama
 from dotenv import load_dotenv
 
+from .paths import resolve_db_dir
 from .recall import ChatDatabase
 from .registry import Registry
 from .vector_memory import VectorMemory
@@ -101,12 +102,6 @@ class HealthReport:
             "hard_failures": len(self.hard_failures),
             "soft_failures": len(self.soft_failures),
         }
-
-
-def _resolve_db_dir(*, test_mode: bool) -> Path:
-    if test_mode:
-        return Path(os.getenv("TEST_DB_DIR", "data/test/"))
-    return Path(os.getenv("DB_DIR", "data/prod/"))
 
 
 def _logs_dir(db_dir: Path) -> Path:
@@ -229,7 +224,7 @@ def validate_startup_config() -> list[CheckResult]:
 
 def validate_local_state(*, test_mode: bool) -> list[CheckResult]:
     results: list[CheckResult] = []
-    db_dir = _resolve_db_dir(test_mode=test_mode)
+    db_dir = resolve_db_dir(test_mode=test_mode)
     logs_dir = _logs_dir(db_dir)
 
     results.append(_check_writable_dir(db_dir, name="DB_DIR"))
@@ -364,7 +359,7 @@ async def check_searxng() -> CheckResult:
 async def check_vector_memory(*, test_mode: bool) -> CheckResult:
     original_db_dir = os.getenv("DB_DIR")
     try:
-        os.environ["DB_DIR"] = str(_resolve_db_dir(test_mode=test_mode))
+        os.environ["DB_DIR"] = str(resolve_db_dir(test_mode=test_mode))
         VectorMemory()
         return CheckResult(
             name="vector_memory",

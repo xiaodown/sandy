@@ -16,27 +16,22 @@ from textwrap import shorten
 
 from dotenv import load_dotenv
 
+from .paths import resolve_db_dir
 from .recall import ChatDatabase
 from .vector_memory import VectorMemory
 
 load_dotenv()
 
 
-def _resolve_db_dir(*, test_mode: bool) -> Path:
-    if test_mode:
-        return Path(os.getenv("TEST_DB_DIR", "data/test/"))
-    return Path(os.getenv("DB_DIR", "data/prod/"))
-
-
 def _build_recall_db(*, test_mode: bool) -> ChatDatabase:
-    db_dir = _resolve_db_dir(test_mode=test_mode)
+    db_dir = resolve_db_dir(test_mode=test_mode)
     db = ChatDatabase(str(db_dir / os.getenv("RECALL_DB_NAME", "recall.db")))
     db.init_db()
     return db
 
 
 def _build_vector_memory(*, test_mode: bool) -> VectorMemory:
-    db_dir = _resolve_db_dir(test_mode=test_mode)
+    db_dir = resolve_db_dir(test_mode=test_mode)
     os.environ["DB_DIR"] = str(db_dir)
     return VectorMemory()
 

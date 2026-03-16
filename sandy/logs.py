@@ -23,6 +23,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from .paths import resolve_db_dir
+
 load_dotenv()
 
 
@@ -35,10 +37,7 @@ class LogPaths:
 
 
 def _resolve_paths(*, test_mode: bool) -> LogPaths:
-    if test_mode:
-        db_dir = Path(os.getenv("TEST_DB_DIR", "data/test/"))
-    else:
-        db_dir = Path(os.getenv("DB_DIR", "data/prod/"))
+    db_dir = resolve_db_dir(test_mode=test_mode)
     logs_dir = db_dir / "logs"
     return LogPaths(
         db_dir=db_dir,

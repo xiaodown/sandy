@@ -25,6 +25,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .paths import resolve_runtime_path
+
 load_dotenv()
 
 _ANSI_RESET = "\033[0m"
@@ -47,8 +49,8 @@ _LOGGER_COLORS = (
 
 
 def _logs_dir() -> Path:
-    db_dir = os.getenv("DB_DIR", "data/prod/").rstrip("/\\") or "data/prod"
-    path = Path(db_dir) / "logs"
+    db_dir = resolve_runtime_path(os.getenv("DB_DIR", "data/prod/"))
+    path = db_dir / "logs"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

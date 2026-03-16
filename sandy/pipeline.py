@@ -30,6 +30,7 @@ from .last10 import (
 from .llm import OllamaInterface
 from .logconf import emit_forensic_record, get_logger
 from .memory import MemoryClient
+from .paths import resolve_runtime_path
 from .recall import ChatDatabase
 from .registry import Registry
 from .trace import TurnTrace, event_payload, forensic_payload
@@ -775,9 +776,9 @@ def build_pipeline(background_tasks, *, trace_event=_trace_event) -> SandyPipeli
     llm = OllamaInterface()
     vector_memory = VectorMemory()
 
-    db_dir = os.getenv("DB_DIR", "data/prod/")
+    db_dir = resolve_runtime_path(os.getenv("DB_DIR", "data/prod/"))
     recall_db_name = os.getenv("RECALL_DB_NAME", "recall.db")
-    recall_db = ChatDatabase(os.path.join(db_dir, recall_db_name))
+    recall_db = ChatDatabase(str(db_dir / recall_db_name))
     recall_db.init_db()
     tools.init_recall_db(recall_db)
 
