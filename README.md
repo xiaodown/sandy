@@ -1,7 +1,7 @@
 # Sandy
 
 <p align="center">
-  <img src="docs/sandy-hoodie.png" width="256" alt="Sandy" />
+  <img src="docs/images/v2.png" width="256" alt="Sandy" />
 </p>
 
 Sandy is a Discord bot that acts like a person who lives in your server, not a helpful assistant. She has long-term memory, opinions, casual internet-native speech patterns, and no obligation to be useful. She runs entirely on local hardware — no cloud APIs, no OpenAI, no sending your conversations anywhere.
