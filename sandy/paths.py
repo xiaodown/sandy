@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import os
 from pathlib import Path
 
@@ -7,6 +5,11 @@ from pathlib import Path
 def project_root() -> Path:
     """Return the repository root, not the package directory."""
     return Path(__file__).resolve().parent.parent
+
+
+def web_root() -> Path:
+    """Return the top-level web assets directory."""
+    return project_root() / "web"
 
 
 def resolve_runtime_path(raw_path: str | os.PathLike[str]) -> Path:

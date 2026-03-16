@@ -8,8 +8,6 @@ It also exposes a small CLI via ``python -m sandy.health`` for explicit operator
 preflight checks over SSH.
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import json

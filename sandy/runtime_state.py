@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 from threading import Lock
 from time import time
@@ -38,6 +36,7 @@ class RuntimeState:
         self._lock = Lock()
         self._discord_connected = False
         self._discord_user: str | None = None
+        self._discord_servers: list[str] = []
         self._active_turns: dict[str, ActiveTurn] = {}
         self._memory_queue_depth = 0
         self._memory_processing_message_id: int | None = None
@@ -48,6 +47,10 @@ class RuntimeState:
             self._discord_connected = connected
             if user_name is not None:
                 self._discord_user = user_name
+
+    def set_discord_servers(self, server_names: list[str]) -> None:
+        with self._lock:
+            self._discord_servers = list(server_names)
 
     def begin_turn(self, trace: TurnTrace, *, author_is_bot: bool) -> None:
         now = time()
@@ -157,6 +160,8 @@ class RuntimeState:
                 "discord": {
                     "connected": self._discord_connected,
                     "user_name": self._discord_user,
+                    "server_count": len(self._discord_servers),
+                    "server_names": list(self._discord_servers),
                 },
                 "active_turns": active_turns,
                 "memory_worker": {

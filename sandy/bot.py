@@ -5,8 +5,6 @@ This module owns Discord client lifecycle, event registration, and orderly
 shutdown. The actual message pipeline lives in pipeline.py.
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import os
@@ -80,6 +78,7 @@ pipeline = build_pipeline(background_tasks=background_tasks, runtime_state=runti
 async def on_ready():
     """Event handler for when the bot is ready."""
     runtime_state.set_discord_connected(True, user_name=bot.user.name if bot.user else None)
+    runtime_state.set_discord_servers([guild.name for guild in bot.guilds])
     await pipeline.on_ready(bot)
 
 

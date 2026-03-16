@@ -8,8 +8,6 @@ Usage examples:
     python -m sandy.logs failures
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os
@@ -222,7 +220,6 @@ def get_trace_detail(*, test_mode: bool, trace_id: str) -> dict[str, Any] | None
             (trace_id,),
         ).fetchone()
         turn_payload = json.loads(turn_row["payload_json"]) if turn_row else {}
-
     return {
         "trace_id": trace_id,
         "turn_input": turn_input,

@@ -10,8 +10,6 @@ The root logger writes through a QueueHandler so normal app code never blocks
 on I/O. A QueueListener drains records on a background thread.
 """
 
-from __future__ import annotations
-
 import atexit
 from dotenv import load_dotenv
 import json

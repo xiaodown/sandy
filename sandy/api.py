@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 import json
+import mimetypes
 import logging
 import os
 import shutil
@@ -8,11 +7,14 @@ import subprocess
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from threading import Thread
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from . import logs
+from .paths import resolve_db_dir, web_root
+from .registry import Registry
 
 logger = logging.getLogger("sandy.api")
 
@@ -161,6 +163,80 @@ def _gpu_payload() -> dict[str, Any]:
     return _gpu_payload_from_nvml() or _gpu_payload_from_nvidia_smi()
 
 
+def _resolve_static_path(url_path: str, *, prefix: str, root: Path) -> Path | None:
+    if not url_path.startswith(prefix):
+        return None
+    relative = url_path[len(prefix):].lstrip("/")
+    candidate = (root / relative).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError:
+        return None
+    if not candidate.is_file():
+        return None
+    return candidate
+
+
+def _build_registry(*, test_mode: bool) -> Registry | None:
+    original_db_dir = os.getenv("DB_DIR")
+    try:
+        os.environ["DB_DIR"] = str(resolve_db_dir(test_mode=test_mode))
+        return Registry()
+    except Exception:
+        return None
+    finally:
+        if original_db_dir is None:
+            os.environ.pop("DB_DIR", None)
+        else:
+            os.environ["DB_DIR"] = original_db_dir
+
+
+def _enrich_trace_detail(detail: dict[str, Any], *, registry: Registry | None) -> dict[str, Any]:
+    turn_input = detail.get("turn_input", {})
+    timeline = detail.get("timeline", [])
+    enriched_timeline: list[dict[str, Any]] = []
+
+    for event in timeline:
+        payload = dict(event)
+        guild_id = payload.get("guild_id")
+        channel_id = payload.get("channel_id")
+        author_id = payload.get("author_id")
+
+        if turn_input.get("guild_name"):
+            payload.setdefault("guild_name", turn_input.get("guild_name"))
+        if turn_input.get("channel_name"):
+            payload.setdefault("channel_name", turn_input.get("channel_name"))
+        if turn_input.get("author_name"):
+            payload.setdefault("author_name", turn_input.get("author_name"))
+
+        if registry is not None and channel_id is not None:
+            channel_info = registry.get_channel_info(channel_id)
+            if channel_info is not None:
+                payload["channel_name"] = channel_info.get("channel_name") or payload.get("channel_name")
+                payload["guild_name"] = channel_info.get("server_name") or payload.get("guild_name")
+                guild_id = channel_info.get("server_id", guild_id)
+                payload["guild_id"] = guild_id
+
+        if registry is not None and author_id is not None:
+            user_info = registry.get_user_info(author_id, guild_id)
+            if user_info is not None:
+                payload["author_name"] = (
+                    user_info.get("nickname")
+                    or user_info.get("user_name")
+                    or payload.get("author_name")
+                )
+                payload["author_username"] = user_info.get("user_name")
+                if user_info.get("nickname"):
+                    payload["author_nickname"] = user_info.get("nickname")
+
+        enriched_timeline.append(payload)
+
+    return {
+        **detail,
+        "timeline": enriched_timeline,
+    }
+
+
 @dataclass(slots=True)
 class ApiService:
     pipeline: Any
@@ -194,7 +270,11 @@ class ApiService:
         }
 
     def trace_detail_payload(self, trace_id: str) -> dict[str, Any] | None:
-        return logs.get_trace_detail(test_mode=self.test_mode, trace_id=trace_id)
+        detail = logs.get_trace_detail(test_mode=self.test_mode, trace_id=trace_id)
+        if detail is None:
+            return None
+        registry = _build_registry(test_mode=self.test_mode)
+        return _enrich_trace_detail(detail, registry=registry)
 
 
 class _ApiHandler(BaseHTTPRequestHandler):
@@ -210,6 +290,20 @@ class _ApiHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         try:
+            if path in {"/", "/dashboard"}:
+                self._write_file(HTTPStatus.OK, web_root() / "dashboard" / "index.html")
+                return
+            if path == "/favicon.svg":
+                self._write_file(HTTPStatus.OK, web_root() / "dashboard" / "favicon.svg")
+                return
+            dashboard_asset = _resolve_static_path(
+                path,
+                prefix="/dashboard/",
+                root=web_root() / "dashboard",
+            )
+            if dashboard_asset is not None:
+                self._write_file(HTTPStatus.OK, dashboard_asset)
+                return
             if path == "/api/status":
                 self._write_json(HTTPStatus.OK, self.api_service.status_payload())
                 return
@@ -246,6 +340,19 @@ class _ApiHandler(BaseHTTPRequestHandler):
         body = json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _write_file(self, status: HTTPStatus, path: Path) -> None:
+        body = path.read_bytes()
+        content_type, _ = mimetypes.guess_type(path.name)
+        content_type = content_type or "application/octet-stream"
+        self.send_response(status)
+        if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"}:
+            content_type += "; charset=utf-8"
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()

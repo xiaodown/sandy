@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sandy Control Panel</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/dashboard/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <div class="env-banner" id="env-banner">PROD MODE</div>
+    <section class="masthead">
+      <div class="hero">
+        <div class="hero-portrait-wrap">
+          <img class="hero-portrait" src="/dashboard/images/v3.png" alt="Sandy portrait">
+        </div>
+        <div class="hero-copy">
+          <div class="eyebrow">Sandy | Telemetry and Operations</div>
+          <h1>Control Panel</h1>
+        </div>
+      </div>
+      <div class="chip-row">
+        <div class="panel chip">
+          <div class="chip-label">Discord</div>
+          <div class="chip-value" id="discord-state">Unknown</div>
+          <div class="chip-subtle" id="discord-user">Waiting for status…</div>
+          <div class="chip-subtle" id="discord-servers">No server data</div>
+        </div>
+        <div class="panel chip">
+          <div class="chip-label">LLM</div>
+          <div class="chip-value" id="llm-state">Idle</div>
+          <div class="chip-subtle" id="llm-note">Shared Ollama lock</div>
+        </div>
+        <div class="panel chip">
+          <div class="chip-label">Memory Worker</div>
+          <div class="chip-value" id="memory-state">Idle</div>
+          <div class="chip-subtle" id="memory-note">Queue depth 0</div>
+        </div>
+        <div class="panel chip">
+          <div class="chip-label">Last Bouncer</div>
+          <div class="chip-value" id="bouncer-state">None</div>
+          <div class="chip-subtle" id="bouncer-note">No decision yet</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="main-grid">
+      <div class="stack">
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">Current Turn</div>
+            <div class="panel-note" id="current-turn-note">Idle</div>
+          </div>
+          <div class="summary-grid">
+            <div class="summary-box">
+              <div class="chip-label">Author</div>
+              <strong id="current-author">Nobody</strong>
+              <div class="chip-subtle" id="current-location">No active turn</div>
+            </div>
+            <div class="summary-box">
+              <div class="chip-label">Trace</div>
+              <strong class="mono" id="current-trace">-</strong>
+              <div class="chip-subtle" id="current-started">Waiting</div>
+            </div>
+          </div>
+          <div class="track" id="racetrack"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">Recent Turns</div>
+            <div class="panel-note">Click a row to inspect the trace</div>
+          </div>
+          <table>
+            <colgroup>
+              <col style="width: 10%">
+              <col style="width: 12%">
+              <col style="width: 17%">
+              <col style="width: 7%">
+              <col style="width: 11%">
+              <col style="width: 10%">
+              <col style="width: 33%">
+            </colgroup>
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Author</th>
+                <th>Channel</th>
+                <th>Reply</th>
+                <th>Tool</th>
+                <th>Duration</th>
+                <th>Content</th>
+              </tr>
+            </thead>
+            <tbody id="recent-turns"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="stack">
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">GPU Telemetry</div>
+            <div class="panel-note" id="gpu-backend">Waiting…</div>
+          </div>
+          <div class="gpu-grid" id="gpu-grid"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="modal-backdrop is-hidden" id="trace-modal-backdrop"></div>
+  <div class="modal-shell is-hidden" id="trace-modal-shell" aria-hidden="true">
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="detail-trace-title">
+      <div class="panel-header modal-header">
+        <div>
+          <div class="panel-title" id="detail-trace-title">Trace Detail</div>
+          <div class="panel-note" id="detail-trace-note">Select a recent turn</div>
+        </div>
+        <button class="modal-close" id="trace-modal-close" type="button" aria-label="Close trace detail">Close</button>
+      </div>
+      <div id="detail-pane" class="detail-empty">
+        Nothing selected yet. Click a recent turn to load the full timeline,
+        tool/retrieval artifacts, and the final reply.
+      </div>
+    </div>
+  </div>
+
+  <script src="/dashboard/app.js"></script>
+</body>
+</html>

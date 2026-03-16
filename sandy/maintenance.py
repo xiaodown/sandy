@@ -6,8 +6,6 @@ Examples:
     python -m sandy.maintenance purge-vector-from-recall --query "Vault of the Vanquished" --test --yes
 """
 
-from __future__ import annotations
-
 import argparse
 import os
 import sys

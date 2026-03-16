@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import sqlite3
 from pathlib import Path
@@ -7,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import sandy.api as api_module
-from sandy.api import ApiService
+from sandy.api import ApiService, _resolve_static_path
 from sandy.runtime_state import RuntimeState
 from sandy.trace import TurnTrace
 
@@ -203,3 +201,16 @@ def test_api_service_serves_recent_and_trace_detail(monkeypatch, tmp_path: Path)
 
     missing = service.trace_detail_payload("missing")
     assert missing is None
+
+
+def test_resolve_static_path_stays_within_root(tmp_path: Path) -> None:
+    root = tmp_path / "dashboard"
+    root.mkdir()
+    asset = root / "images" / "v3.png"
+    asset.parent.mkdir()
+    asset.write_bytes(b"png")
+
+    resolved = _resolve_static_path("/dashboard/images/v3.png", prefix="/dashboard/", root=root)
+
+    assert resolved == asset.resolve()
+    assert _resolve_static_path("/dashboard/../../etc/passwd", prefix="/dashboard/", root=root) is None

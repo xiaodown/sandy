@@ -5,8 +5,6 @@ bot.py should remain thin Discord glue. This module owns the application-side
 objects needed to turn a Discord message into Sandy behavior.
 """
 
-from __future__ import annotations
-
 import asyncio
 import io
 import os

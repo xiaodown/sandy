@@ -160,6 +160,7 @@ By default it listens on `127.0.0.1:8765`.
 Endpoints:
 
 ```bash
+open http://127.0.0.1:8765/
 curl http://127.0.0.1:8765/api/status
 curl http://127.0.0.1:8765/api/gpu
 curl 'http://127.0.0.1:8765/api/turns/recent?limit=10'
@@ -168,6 +169,7 @@ curl http://127.0.0.1:8765/api/turns/<trace_id>
 
 Current scope is intentionally small:
 
+- `/` — local dashboard page with status, GPU cards, current turn track, recent turns, and trace drill-down
 - `/api/status` — Discord connected state, current active turn/stage, memory-worker state, LLM busy/idle, last bouncer decision
 - `/api/gpu` — GPU telemetry via `nvidia-smi` when available
 - `/api/turns/recent` — recent turn summaries for list views

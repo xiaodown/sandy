@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from sandy.runtime_state import RuntimeState
 from sandy.trace import TurnTrace
 
@@ -23,6 +21,7 @@ def test_runtime_state_tracks_turns_memory_and_bouncer() -> None:
     trace = _trace()
 
     state.set_discord_connected(True, user_name="Sandy")
+    state.set_discord_servers(["Guild One", "Guild Two"])
     state.begin_turn(trace, author_is_bot=False)
     state.update_turn_stage(trace, "brain")
     state.memory_enqueued()
@@ -38,6 +37,8 @@ def test_runtime_state_tracks_turns_memory_and_bouncer() -> None:
 
     assert snapshot["discord"]["connected"] is True
     assert snapshot["discord"]["user_name"] == "Sandy"
+    assert snapshot["discord"]["server_count"] == 2
+    assert snapshot["discord"]["server_names"] == ["Guild One", "Guild Two"]
     assert snapshot["active_turns"][0]["trace_id"] == trace.trace_id
     assert snapshot["active_turns"][0]["stage"] == "brain"
     assert snapshot["memory_worker"]["busy"] is True
