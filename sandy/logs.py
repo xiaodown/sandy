@@ -115,10 +115,27 @@ def _summarize_recent_turns(
     fetch_limit = limit if not human_only else max(limit * 4, limit + 10)
     turn_rows = conn.execute(
         """
-        SELECT created_at, trace_id, payload_json
-        FROM trace_events
-        WHERE stage = 'turn_completed'
-        ORDER BY created_at DESC
+        SELECT
+            tc.created_at AS completed_at,
+            tc.id AS completed_id,
+            tc.trace_id,
+            tc.payload_json AS turn_payload_json,
+            mr.created_at AS message_created_at,
+            mr.payload_json AS message_payload_json
+        FROM trace_events AS tc
+        LEFT JOIN trace_events AS mr
+          ON mr.id = (
+              SELECT id
+              FROM trace_events
+              WHERE trace_id = tc.trace_id AND stage = 'message_received'
+              ORDER BY created_at ASC, id ASC
+              LIMIT 1
+          )
+        WHERE tc.stage = 'turn_completed'
+        ORDER BY
+            COALESCE(mr.created_at, tc.created_at) DESC,
+            tc.created_at DESC,
+            tc.id DESC
         LIMIT ?
         """,
         (fetch_limit,),
@@ -126,18 +143,8 @@ def _summarize_recent_turns(
     results: list[dict[str, Any]] = []
     for row in turn_rows:
         trace_id = row["trace_id"]
-        turn_payload = json.loads(row["payload_json"])
-        message_row = conn.execute(
-            """
-            SELECT payload_json
-            FROM trace_events
-            WHERE trace_id = ? AND stage = 'message_received'
-            ORDER BY created_at ASC, id ASC
-            LIMIT 1
-            """,
-            (trace_id,),
-        ).fetchone()
-        message_payload = json.loads(message_row["payload_json"]) if message_row else {}
+        turn_payload = json.loads(row["turn_payload_json"])
+        message_payload = json.loads(row["message_payload_json"]) if row["message_payload_json"] else {}
         author_is_bot = bool(message_payload.get("author_is_bot"))
         if human_only and author_is_bot:
             continue
@@ -147,7 +154,7 @@ def _summarize_recent_turns(
         tool_call = forensic.get("tool_call", {})
         results.append(
             {
-                "created_at": row["created_at"],
+                "created_at": row["message_created_at"] or row["completed_at"],
                 "trace_id": trace_id,
                 "author_name": turn_input.get("author_name", "?"),
                 "channel_name": turn_input.get("channel_name", "?"),

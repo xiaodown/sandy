@@ -280,13 +280,13 @@ h1 {
 
 .track {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(8, minmax(0, 1fr));
   gap: 10px;
   margin-top: 12px;
 }
 
 .stage-card {
-  padding: 14px 12px;
+  padding: 13px 11px;
   border-radius: 16px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.65);
@@ -325,12 +325,12 @@ h1 {
 
 .stage-name {
   font-weight: 700;
-  font-size: 15px;
-  margin-bottom: 8px;
+  font-size: 14px;
+  margin-bottom: 7px;
 }
 
 .stage-meta {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--muted);
   line-height: 1.4;
 }
@@ -673,7 +673,7 @@ tbody tr:hover {
   }
 
   .track {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 

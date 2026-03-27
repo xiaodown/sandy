@@ -18,7 +18,12 @@ When someone posts a message in a channel Sandy is in:
 4. **Brain** generates a reply using all of the above — personality prompt, conversation history, memories, tool results
 5. In the background: the message gets tagged, optionally summarized, stored in Recall (SQLite), and embedded in ChromaDB
 
-Sandy sees images too. Attachments get described by a vision model and the description is injected into context so she can react to what people post.
+Sandy sees images too. Attachments now go through a two-stage vision path:
+
+- a cheap routing caption before the bouncer decides whether Sandy should reply
+- a richer detailed description only if Sandy is actually going to respond
+
+That keeps non-reply image posts cheaper while still grounding real image replies properly.
 
 Everything runs locally on a single machine. The LLM inference, the embeddings, the databases, the web search — all of it.
 
@@ -71,6 +76,7 @@ The `.env` is well-commented and broken into sections. The important bits:
 - `DB_DIR` — production database directory
 - `TEST_DB_DIR` — database directory used automatically by `python -m sandy --test`
 - `BRAIN_MODEL`, `BOUNCER_MODEL`, etc. — ollama model tags. Roles can share a model, but splitting them is often better once VRAM behavior is understood.
+- `VISION_ROUTER_MODEL` — optional tiny multimodal model for cheap pre-bouncer image captions
 - `EMBED_MODEL` — embedding model for ChromaDB (default: `mxbai-embed-large`)
 - `OLLAMA_KEEP_ALIVE` — how long ollama keeps a model in VRAM after the last request. `1h` is a better default when Sandy is the main local GPU workload; lowering it mainly buys back VRAM, not necessarily lower idle power.
 - If multiple roles share one model tag, keep their `*_NUM_CTX` values aligned unless you want Ollama to spin up separate runners for the same model.

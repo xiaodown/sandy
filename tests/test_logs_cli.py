@@ -89,7 +89,7 @@ def test_summarize_recent_turns_uses_trace_and_forensic_data(tmp_path: Path) -> 
 
     assert turns == [
         {
-            "created_at": "2026-03-14T06:00:00+00:00",
+            "created_at": "2026-03-14T05:59:59+00:00",
             "trace_id": "123",
             "author_name": "alice",
             "channel_name": "general",
@@ -264,3 +264,77 @@ def test_summarize_recent_turns_human_only_backfills_past_bot_rows(tmp_path: Pat
     turns = _summarize_recent_turns(conn, forensic_records, limit=2, human_only=True)
 
     assert [turn["trace_id"] for turn in turns] == ["human-b", "human-a"]
+
+
+def test_summarize_recent_turns_orders_by_message_time_not_completion_time(tmp_path: Path) -> None:
+    conn = _make_trace_db(tmp_path / "trace.db")
+    rows = [
+        (
+            "human",
+            False,
+            "2026-03-14T06:00:00+00:00",
+            "2026-03-14T06:00:10+00:00",
+            "alice",
+            "hey sandy, what's up?",
+        ),
+        (
+            "bot",
+            True,
+            "2026-03-14T06:00:05+00:00",
+            "2026-03-14T06:00:09+00:00",
+            "Sandy",
+            "not much",
+        ),
+    ]
+    forensic_records = {}
+    for idx, (trace_id, author_is_bot, message_time, completed_time, author_name, content) in enumerate(rows, start=1):
+        conn.execute(
+            """
+            INSERT INTO trace_events (created_at, trace_id, stage, status, message_id, guild_id, channel_id, author_id, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                message_time,
+                trace_id,
+                "message_received",
+                "ok",
+                idx,
+                1,
+                2,
+                3,
+                json.dumps({"trace_id": trace_id, "author_is_bot": author_is_bot}),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO trace_events (created_at, trace_id, stage, status, message_id, guild_id, channel_id, author_id, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                completed_time,
+                trace_id,
+                "turn_completed",
+                "ok",
+                idx,
+                1,
+                2,
+                3,
+                json.dumps({"trace_id": trace_id, "replied": not author_is_bot, "duration_ms": idx}),
+            ),
+        )
+        forensic_records[trace_id] = {
+            "turn_input": {
+                "author_name": author_name,
+                "channel_name": "general",
+                "guild_name": "Guild",
+                "resolved_content": content,
+            }
+        }
+
+    turns = _summarize_recent_turns(conn, forensic_records, limit=10, human_only=False)
+
+    assert [turn["trace_id"] for turn in turns] == ["bot", "human"]
+    assert [turn["created_at"] for turn in turns] == [
+        "2026-03-14T06:00:05+00:00",
+        "2026-03-14T06:00:00+00:00",
+    ]

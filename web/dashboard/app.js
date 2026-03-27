@@ -1,7 +1,8 @@
 const stageOrder = [
   { key: "message_received", label: "Intake", desc: "Message enters pipeline" },
-  { key: "vision", label: "Vision", desc: "Image inspection if needed" },
+  { key: "vision_router", label: "Vision Lite", desc: "Cheap image routing caption" },
   { key: "bouncer", label: "Bouncer", desc: "Respond or ignore" },
+  { key: "vision_detail", label: "Vision Full", desc: "Detailed image grounding" },
   { key: "tool_started", label: "Tool", desc: "Lookup before talking" },
   { key: "retrieval", label: "Memory", desc: "Vector/RAG recall" },
   { key: "brain", label: "Brain", desc: "Main generation" },
@@ -11,7 +12,8 @@ const MAX_SERVER_NAMES = 4;
 const MAX_SERVER_NAME_CHARS = 22;
 const STAGE_LINGER_MS = 1000;
 const LATENCY_SEGMENTS = [
-  { key: "vision", label: "Vision", color: "#6c8ef5" },
+  { key: "vision_router", label: "Vision Lite", color: "#8aa4ff" },
+  { key: "vision_detail", label: "Vision Full", color: "#4f74e8" },
   { key: "bouncer", label: "Bouncer", color: "#d62828" },
   { key: "tool", label: "Tool", color: "#e58f00" },
   { key: "retrieval", label: "Memory", color: "#2a9d8f" },
@@ -66,6 +68,7 @@ function formatAgo(epochSeconds) {
 function formatDurationShort(ms) {
   if (ms == null || Number.isNaN(Number(ms))) return "-";
   const value = Number(ms);
+  if (value === 0) return "<1ms";
   if (value < 1000) return `${Math.round(value)}ms`;
   return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}s`;
 }
@@ -79,7 +82,8 @@ function formatChartTick(ms) {
 
 function traceStageGroup(stage) {
   const normalized = String(stage || "").toLowerCase();
-  if (normalized.startsWith("vision")) return "vision";
+  if (normalized.startsWith("vision_router")) return "vision_router";
+  if (normalized.startsWith("vision_detail")) return "vision_detail";
   if (normalized.startsWith("bouncer")) return "bouncer";
   if (normalized.startsWith("tool")) return "tool";
   if (normalized.startsWith("retrieval")) return "retrieval";
@@ -87,6 +91,19 @@ function traceStageGroup(stage) {
   if (normalized.startsWith("reply")) return "send";
   if (normalized.startsWith("memory")) return "persist";
   return null;
+}
+
+function trackStageKey(stage) {
+  const normalized = String(stage || "").toLowerCase();
+  if (normalized.startsWith("message_received")) return "message_received";
+  if (normalized.startsWith("vision_router")) return "vision_router";
+  if (normalized.startsWith("bouncer")) return "bouncer";
+  if (normalized.startsWith("vision_detail")) return "vision_detail";
+  if (normalized.startsWith("tool")) return "tool_started";
+  if (normalized.startsWith("retrieval")) return "retrieval";
+  if (normalized.startsWith("brain")) return "brain";
+  if (normalized.startsWith("reply")) return "reply_send";
+  return stage || null;
 }
 
 function stageDurationsFromDetail(detail) {
@@ -188,7 +205,7 @@ function renderTrack(current) {
     stagePresentation = { stage: null, seenAt: 0 };
   }
 
-  const currentStage = stagePresentation.stage;
+  const currentStage = trackStageKey(stagePresentation.stage);
   const container = el("racetrack");
   container.innerHTML = stageOrder.map((stage, index) => {
     const active = currentStage === stage.key;
@@ -256,7 +273,7 @@ function renderRecent(payload) {
       <td>${escapeHtml(turn.guild_name)} / #${escapeHtml(turn.channel_name)}</td>
       <td>${turn.replied ? "yes" : "no"}</td>
       <td>${escapeHtml(turn.tool_name || "-")}</td>
-      <td class="mono">${turn.duration_ms ?? "-"}ms</td>
+      <td class="mono">${escapeHtml(formatDurationShort(turn.duration_ms))}</td>
       <td class="truncate"><div class="recent-content">${escapeHtml(turn.content || "")}</div></td>
     </tr>
   `).join("");

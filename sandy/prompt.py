@@ -260,8 +260,26 @@ Respond only with a JSON object matching the required schema."""
         return OllamaPrompt(system=system, user=user)
 
     @staticmethod
-    def vision_prompt() -> OllamaPrompt:
-        """Prompt for the Vision role — plain factual image description, zero personality.
+    def vision_router_prompt() -> OllamaPrompt:
+        """Prompt for the cheap pre-bouncer vision caption."""
+        system = (
+            "You are a fast image routing captioner. "
+            "Write one short factual caption for the image. "
+            "Keep it concise enough for a routing model, not a full description. "
+            "Prefer the main subject, action, setting, and any obviously readable text. "
+            "If readable text matters, mention only the most important short text. "
+            "Do not speculate. Do not editorialize. Do not write a paragraph. "
+            "Output a single plain line only."
+        )
+        user = (
+            "Give a terse caption for this image in about 12 to 24 words. "
+            "If there is obvious readable text that matters, include it briefly."
+        )
+        return OllamaPrompt(system=system, user=user)
+
+    @staticmethod
+    def vision_detail_prompt() -> OllamaPrompt:
+        """Prompt for the detailed vision grounding path.
 
         This is intentionally sterile. The description is injected into Sandy's context
         as raw information; Sandy's voice comes from her brain prompt, not from here.
@@ -269,20 +287,26 @@ Respond only with a JSON object matching the required schema."""
         system = (
             "You are an image analysis system. "
             "Your sole function is to describe images accurately and completely. "
-            "Describe what you observe: people, creatures, objects, clothing, actions, "
-            "facial expressions, visible text, colors, lighting, composition, setting, "
-            "art style or photo style, and any notable small details that matter. "
+            "Describe what you observe: the main subject, action or pose, setting, visible text, "
+            "and the most relevant visual details. "
+            "Include a few telling specifics when they matter, not an exhaustive inventory. "
             "Write a grounded description rich enough that a separate language model "
             "can react as if it actually saw the image. "
             "If any detail is unclear, say that it appears or seems to be present rather "
             "than pretending certainty. "
-            "Be detailed and concrete, but do not ramble. "
-            "Output only a plain factual description — no personality, no opinions, "
-            "no editorial commentary, no emotional response."
+            "Be detailed and concrete, but keep it to one compact paragraph. "
+            "A small amount of mood or atmosphere language is fine when it comes directly from what is visible, "
+            "but do not drift into essays, reviews, or extra interpretation. "
+            "Output only the description."
         )
         user = (
             "Describe this image in enough detail for a Discord personality bot to understand what is "
             "happening, what stands out visually, and what text or small details might "
-            "matter."
+            "matter. Keep it compact, grounded, and under roughly 120 words."
         )
         return OllamaPrompt(system=system, user=user)
+
+    @staticmethod
+    def vision_prompt() -> OllamaPrompt:
+        """Backwards-compatible alias for the detailed vision prompt."""
+        return SandyPrompt.vision_detail_prompt()

@@ -61,8 +61,9 @@ All imports within the package are relative (`from .llm import OllamaInterface`,
 Discord message
   → bot.py              on_message entry point
   → pipeline.py         handle_message
-  → pipeline.py         _describe_attachments (vision model, if images)
+  → pipeline.py         cheap vision router caption (if images)
   → llm.py              ask_bouncer: should Sandy respond? + tool recommendation
+  → pipeline.py         detailed vision grounding (only if Sandy will reply)
   → tools.py            dispatch (execute tool, if bouncer recommended one)
   → pipeline.py         _format_tool_context (frame results for brain injection)
   → vector_memory.py    query (RAG: semantically similar past messages)
@@ -109,8 +110,13 @@ Key env vars:
 | `BOUNCER_NUM_CTX` | Bouncer context window size | `8192` |
 | `TAGGER_NUM_CTX` | Tagger context window size | `4096` |
 | `SUMMARIZER_NUM_CTX` | Summarizer context window size | `4096` |
-| `VISION_NUM_CTX` | Vision context window size | `8192` |
-| `VISION_NUM_PREDICT` | Vision output token cap | `384` |
+| `VISION_NUM_CTX` | Vision context window size | `4096` |
+| `VISION_NUM_PREDICT` | Vision output token cap | `224` |
+| `VISION_TEMPERATURE` | Detailed vision creativity / sprawl control | `0.3` |
+| `VISION_ROUTER_MODEL` | Cheap pre-bouncer vision caption model | unset |
+| `VISION_ROUTER_NUM_CTX` | Router caption context window size | `2048` |
+| `VISION_ROUTER_NUM_PREDICT` | Router caption output token cap | `48` |
+| `VISION_ROUTER_TEMPERATURE` | Router caption determinism | `0.1` |
 | `PREWARM_NUM_CTX` | Prewarm context window size | `BOUNCER_NUM_CTX` |
 | `OLLAMA_KEEP_ALIVE` | VRAM model retention | `1h` |
 | `SUMMARIZE_THRESHOLD` | Chars before summarizing | `450` |

@@ -18,6 +18,7 @@ from PIL import Image
 
 from . import tools
 from .last10 import (
+    ChannelHistory,
     Last10,
     SyntheticMessage,
     _SyntheticAuthor,
@@ -56,6 +57,21 @@ _RAG_BYPASS_TOOLS: frozenset[str] = frozenset({"steam_browse"})
 @dataclass(slots=True)
 class AttachmentProcessingResult:
     descriptions: list[str]
+    fallback_count: int = 0
+    fallback_reasons: list[str] | None = None
+
+
+@dataclass(slots=True)
+class PreparedAttachment:
+    filename: str
+    image_bytes: bytes | None = None
+    fallback_description: str | None = None
+    fallback_reason: str | None = None
+
+
+@dataclass(slots=True)
+class AttachmentPreparationResult:
+    attachments: list[PreparedAttachment]
     fallback_count: int = 0
     fallback_reasons: list[str] | None = None
 
@@ -356,6 +372,117 @@ async def _describe_attachments(message: discord.Message, llm) -> AttachmentProc
     )
 
 
+async def _prepare_attachments(message: discord.Message) -> AttachmentPreparationResult:
+    attachments: list[PreparedAttachment] = []
+    fallback_reasons: list[str] = []
+    for attachment in message.attachments:
+        content_type = (attachment.content_type or "").split(";")[0].strip().lower()
+        if content_type not in _VISION_CONTENT_TYPES:
+            logger.debug(
+                "Skipping attachment %s (type %s — not a supported image format)",
+                attachment.filename, content_type or "unknown",
+            )
+            continue
+        if attachment.size > _MAX_IMAGE_BYTES:
+            logger.warning(
+                "Skipping oversized image %s (%d MB)",
+                attachment.filename, attachment.size // (1024 * 1024),
+            )
+            attachments.append(
+                PreparedAttachment(
+                    filename=attachment.filename,
+                    fallback_description=_fallback_attachment_description("the file was too large"),
+                    fallback_reason="oversized",
+                )
+            )
+            fallback_reasons.append("oversized")
+            continue
+        try:
+            image_bytes = await attachment.read()
+        except Exception as exc:
+            logger.error("Failed to download attachment %s: %s", attachment.filename, exc)
+            attachments.append(
+                PreparedAttachment(
+                    filename=attachment.filename,
+                    fallback_description=_fallback_attachment_description("it could not be downloaded"),
+                    fallback_reason="download_failed",
+                )
+            )
+            fallback_reasons.append("download_failed")
+            continue
+        if content_type == "image/webp":
+            try:
+                with Image.open(io.BytesIO(image_bytes)) as img:
+                    buf = io.BytesIO()
+                    img.convert("RGB").save(buf, format="JPEG", quality=90)
+                    image_bytes = buf.getvalue()
+                logger.debug("Converted WebP→JPEG for %s", attachment.filename)
+            except Exception as exc:
+                logger.error("WebP conversion failed for %s: %s", attachment.filename, exc)
+                attachments.append(
+                    PreparedAttachment(
+                        filename=attachment.filename,
+                        fallback_description=_fallback_attachment_description("it could not be processed"),
+                        fallback_reason="conversion_failed",
+                    )
+                )
+                fallback_reasons.append("conversion_failed")
+                continue
+        attachments.append(
+            PreparedAttachment(
+                filename=attachment.filename,
+                image_bytes=image_bytes,
+            )
+        )
+    return AttachmentPreparationResult(
+        attachments=attachments,
+        fallback_count=len(fallback_reasons),
+        fallback_reasons=fallback_reasons or None,
+    )
+
+
+async def _describe_prepared_attachments(prepared: AttachmentPreparationResult, llm, *, detail: bool) -> AttachmentProcessingResult:
+    descriptions: list[str] = []
+    fallback_reasons: list[str] = []
+    ask = llm.ask_vision if detail else llm.ask_vision_router
+
+    for prepared_attachment in prepared.attachments:
+        if prepared_attachment.fallback_description is not None:
+            descriptions.append(prepared_attachment.fallback_description)
+            if prepared_attachment.fallback_reason is not None:
+                fallback_reasons.append(prepared_attachment.fallback_reason)
+            continue
+
+        if prepared_attachment.image_bytes is None:
+            descriptions.append(_fallback_attachment_description("it could not be processed"))
+            fallback_reasons.append("missing_image_bytes")
+            continue
+
+        desc = await ask(prepared_attachment.image_bytes)
+        if desc:
+            descriptions.append(desc)
+            logger.info(
+                "Vision %s described %s: %s",
+                "detail" if detail else "router",
+                prepared_attachment.filename,
+                desc[:80] + ("…" if len(desc) > 80 else ""),
+            )
+        else:
+            logger.warning(
+                "Vision %s returned nothing for %s",
+                "detail" if detail else "router",
+                prepared_attachment.filename,
+            )
+            descriptions.append(_fallback_attachment_description("no description could be generated"))
+            fallback_reasons.append("empty_description")
+
+    return AttachmentProcessingResult(
+        descriptions=descriptions,
+        fallback_count=len(fallback_reasons),
+        fallback_reasons=fallback_reasons or None,
+    )
+
+
 def _build_augmented_content(message: discord.Message, descriptions: list[str]) -> str:
     name = message.author.display_name
     original = resolve_mentions(message.content, message.mentions).strip()
@@ -371,6 +498,42 @@ def _build_augmented_content(message: discord.Message, descriptions: list[str]) 
     if original:
         return f"{original}\n[{name} also attached {n} images]\n{image_lines}"
     return f"[{name} pasted {n} images into the chat]\n{image_lines}"
+
+
+def _build_cache_message(
+    message: discord.Message,
+    descriptions: list[str],
+) -> discord.Message | SyntheticMessage:
+    if descriptions:
+        return SyntheticMessage(
+            content=_build_augmented_content(message, descriptions),
+            created_at=message.created_at,
+            author=_SyntheticAuthor(
+                id=message.author.id,
+                display_name=message.author.display_name,
+                bot=message.author.bot,
+            ),
+            guild=_SyntheticGuild(id=message.guild.id, name=message.guild.name),
+            channel=_SyntheticChannel(id=message.channel.id, name=message.channel.name),
+            mentions=message.mentions,
+        )
+    return message
+
+
+def _build_bouncer_context(
+    history: ChannelHistory,
+    message: discord.Message,
+    descriptions: list[str],
+) -> str:
+    synthetic_latest = _build_cache_message(message, descriptions)
+    latest_line = ChannelHistory(
+        [synthetic_latest],
+        getattr(history, "registry", None),
+    ).format()
+    existing = history.format()
+    if existing == "(no recent messages)":
+        return latest_line
+    return f"{existing}\n{latest_line}"
 
 
 class SandyPipeline:
@@ -407,6 +570,17 @@ class SandyPipeline:
 
     async def describe_attachments(self, message: discord.Message) -> AttachmentProcessingResult:
         return await _describe_attachments(message, self.llm)
+
+    async def prepare_attachments(self, message: discord.Message) -> AttachmentPreparationResult:
+        return await _prepare_attachments(message)
+
+    async def describe_prepared_attachments(
+        self,
+        prepared: AttachmentPreparationResult,
+        *,
+        detail: bool,
+    ) -> AttachmentProcessingResult:
+        return await _describe_prepared_attachments(prepared, self.llm, detail=detail)
 
     async def send_reply(self, message: discord.Message, reply: str) -> int:
         return await _send_reply(message, reply)
@@ -446,25 +620,9 @@ class SandyPipeline:
         message: discord.Message,
         image_descriptions: list[str],
     ) -> str:
-        if image_descriptions:
-            augmented_content = _build_augmented_content(message, image_descriptions)
-            cache_message = SyntheticMessage(
-                content=augmented_content,
-                created_at=message.created_at,
-                author=_SyntheticAuthor(
-                    id=message.author.id,
-                    display_name=message.author.display_name,
-                    bot=message.author.bot,
-                ),
-                guild=_SyntheticGuild(id=message.guild.id, name=message.guild.name),
-                channel=_SyntheticChannel(id=message.channel.id, name=message.channel.name),
-                mentions=message.mentions,
-            )
-            self.cache.add(cache_message)
-            return augmented_content
-
-        self.cache.add(message)
-        return message.content
+        cache_message = _build_cache_message(message, image_descriptions)
+        self.cache.add(cache_message)
+        return cache_message.content
 
     async def _run_tool_step(self, message: discord.Message, trace: TurnTrace, bouncer_result) -> str | None:
         if not (bouncer_result.use_tool and bouncer_result.recommended_tool):
@@ -712,34 +870,35 @@ class SandyPipeline:
                 )
                 return
 
-            # 4. Vision / attachment augmentation
+            # 4. Cheap vision routing caption before bouncer
             vision_started = time.perf_counter()
-            self.runtime_state.update_turn_stage(trace, "vision")
-            attachment_result = await self.describe_attachments(message)
+            self.runtime_state.update_turn_stage(trace, "vision_router")
+            prepared_attachments = await self.prepare_attachments(message)
+            attachment_result = await self.describe_prepared_attachments(prepared_attachments, detail=False)
             self.trace_event(
                 trace,
-                "vision_completed",
+                "vision_router_completed",
                 duration_ms=int((time.perf_counter() - vision_started) * 1000),
                 image_count=len(attachment_result.descriptions),
                 fallback_images=attachment_result.fallback_count,
                 fallback_reasons=attachment_result.fallback_reasons or None,
             )
-            rag_query_text = self._add_message_to_cache(message, attachment_result.descriptions)
+            history = self.cache.get(message.guild.id, message.channel.id)
+            bouncer_context = _build_bouncer_context(history, message, attachment_result.descriptions)
             _forensic_event(
                 trace,
-                "vision_artifacts",
+                "vision_router_artifacts",
                 descriptions=attachment_result.descriptions,
                 fallback_count=attachment_result.fallback_count,
                 fallback_reasons=attachment_result.fallback_reasons or None,
-                rag_query_text=rag_query_text,
+                bouncer_context=bouncer_context,
             )
 
             # 5. Bouncer decision and deferred memory enqueue
-            history = self.cache.get(message.guild.id, message.channel.id)
             bouncer_started = time.perf_counter()
             self.runtime_state.update_turn_stage(trace, "bouncer")
             bouncer_result = await self.llm.ask_bouncer(
-                history.format(),
+                bouncer_context,
                 bot_name=bot_user.display_name,
                 trace=trace,
             )
@@ -768,11 +927,45 @@ class SandyPipeline:
             _forensic_event(
                 trace,
                 "bouncer_context",
-                history_text=history.format(),
+                history_text=bouncer_context,
             )
 
+            final_attachment_result = attachment_result
+            if bouncer_result.should_respond and prepared_attachments.attachments:
+                detail_started = time.perf_counter()
+                self.runtime_state.update_turn_stage(trace, "vision_detail")
+                final_attachment_result = await self.describe_prepared_attachments(
+                    prepared_attachments,
+                    detail=True,
+                )
+                self.trace_event(
+                    trace,
+                    "vision_detail_completed",
+                    duration_ms=int((time.perf_counter() - detail_started) * 1000),
+                    image_count=len(final_attachment_result.descriptions),
+                    fallback_images=final_attachment_result.fallback_count,
+                    fallback_reasons=final_attachment_result.fallback_reasons or None,
+                )
+                _forensic_event(
+                    trace,
+                    "vision_detail_artifacts",
+                    descriptions=final_attachment_result.descriptions,
+                    fallback_count=final_attachment_result.fallback_count,
+                    fallback_reasons=final_attachment_result.fallback_reasons or None,
+                )
+            else:
+                self.trace_event(
+                    trace,
+                    "vision_detail_completed",
+                    status="skipped",
+                    skipped_reason="no_reply" if not bouncer_result.should_respond else "no_attachments",
+                    image_count=0,
+                )
+
+            rag_query_text = self._add_message_to_cache(message, final_attachment_result.descriptions)
+            history = self.cache.get(message.guild.id, message.channel.id)
             self.runtime_state.update_turn_stage(trace, "memory_enqueue")
-            await self.memory_worker.enqueue(message, image_descriptions=attachment_result.descriptions)
+            await self.memory_worker.enqueue(message, image_descriptions=final_attachment_result.descriptions)
             self.trace_event(trace, "memory_enqueued", source="user_message")
 
             # 6-9. Tool -> RAG -> brain -> reply handling - see _run_reply_pipeline()

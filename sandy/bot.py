@@ -74,11 +74,21 @@ runtime_state = RuntimeState()
 pipeline = build_pipeline(background_tasks=background_tasks, runtime_state=runtime_state)
 
 
+def _refresh_discord_runtime_state() -> None:
+    runtime_state.set_discord_connected(True, user_name=bot.user.name if bot.user else None)
+    runtime_state.set_discord_servers([guild.name for guild in bot.guilds])
+
+
+@bot.event
+async def on_connect():
+    """Event handler for when Discord transport connects or reconnects."""
+    _refresh_discord_runtime_state()
+
+
 @bot.event
 async def on_ready():
     """Event handler for when the bot is ready."""
-    runtime_state.set_discord_connected(True, user_name=bot.user.name if bot.user else None)
-    runtime_state.set_discord_servers([guild.name for guild in bot.guilds])
+    _refresh_discord_runtime_state()
     await pipeline.on_ready(bot)
 
 
@@ -86,6 +96,12 @@ async def on_ready():
 async def on_disconnect():
     """Event handler for Discord disconnects."""
     runtime_state.set_discord_connected(False)
+
+
+@bot.event
+async def on_resumed():
+    """Event handler for when Discord resumes after a transient disconnect."""
+    _refresh_discord_runtime_state()
 
 
 @bot.event

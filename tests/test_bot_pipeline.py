@@ -161,6 +161,29 @@ def test_finalize_reply_trims_obvious_truncation(bot_module):
 
 
 @pytest.mark.asyncio
+async def test_discord_runtime_state_recovers_after_resume(bot_module, monkeypatch):
+    monkeypatch.setattr(
+        bot_module,
+        "bot",
+        SimpleNamespace(
+            user=SimpleNamespace(id=999, name="Sandy", display_name="Sandy"),
+            guilds=[SimpleNamespace(name="Guild One"), SimpleNamespace(name="Guild Two")],
+        ),
+    )
+
+    await bot_module.on_connect()
+    await bot_module.on_disconnect()
+    assert bot_module.runtime_state.snapshot()["discord"]["connected"] is False
+
+    await bot_module.on_resumed()
+
+    snapshot = bot_module.runtime_state.snapshot()
+    assert snapshot["discord"]["connected"] is True
+    assert snapshot["discord"]["user_name"] == "Sandy"
+    assert snapshot["discord"]["server_names"] == ["Guild One", "Guild Two"]
+
+
+@pytest.mark.asyncio
 async def test_bot_messages_skip_bouncer_and_are_still_enqueued(bot_module, monkeypatch):
     message = make_message(author_bot=True, content="self chatter")
     cache = FakeCache()
@@ -213,7 +236,12 @@ async def test_memory_is_enqueued_before_reply_send_failure(bot_module, monkeypa
     )
     monkeypatch.setattr(
         bot_module.pipeline,
-        "describe_attachments",
+        "prepare_attachments",
+        AsyncMock(return_value=SimpleNamespace(attachments=[])),
+    )
+    monkeypatch.setattr(
+        bot_module.pipeline,
+        "describe_prepared_attachments",
         AsyncMock(return_value=AttachmentProcessingResult(descriptions=[])),
     )
     monkeypatch.setattr(bot_module.pipeline, "send_reply", fake_send_reply)
@@ -256,7 +284,12 @@ async def test_unknown_tool_is_ignored_without_dispatch(bot_module, monkeypatch)
     monkeypatch.setattr(bot_module.pipeline, "tools_module", tools)
     monkeypatch.setattr(
         bot_module.pipeline,
-        "describe_attachments",
+        "prepare_attachments",
+        AsyncMock(return_value=SimpleNamespace(attachments=[])),
+    )
+    monkeypatch.setattr(
+        bot_module.pipeline,
+        "describe_prepared_attachments",
         AsyncMock(return_value=AttachmentProcessingResult(descriptions=[])),
     )
     monkeypatch.setattr(bot_module.pipeline, "send_reply", send_reply)
@@ -269,10 +302,13 @@ async def test_unknown_tool_is_ignored_without_dispatch(bot_module, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_attachment_descriptions_feed_rag_query_and_memory_enqueue(bot_module, monkeypatch):
+async def test_attachment_reply_path_uses_detailed_caption_for_rag_and_memory(bot_module, monkeypatch):
     message = make_message(content="")
     cache = FakeCache()
     memory_worker = FakeMemoryWorker()
+    prepared = SimpleNamespace(attachments=[SimpleNamespace(image_bytes=b"bytes")])
+    router_descriptions = ["cat on couch"]
+    detail_descriptions = ["a cat sleeping on a couch with its paws tucked under its body"]
     llm = SimpleNamespace(
         ask_bouncer=AsyncMock(
             return_value=SimpleNamespace(
@@ -286,7 +322,12 @@ async def test_attachment_descriptions_feed_rag_query_and_memory_enqueue(bot_mod
     )
     vector_memory = SimpleNamespace(query=AsyncMock(return_value=""))
     send_reply = AsyncMock(return_value=1)
-    image_descriptions = ["a cat sleeping on a couch"]
+    describe_prepared = AsyncMock(
+        side_effect=[
+            AttachmentProcessingResult(descriptions=router_descriptions),
+            AttachmentProcessingResult(descriptions=detail_descriptions),
+        ]
+    )
 
     monkeypatch.setattr(bot_module.pipeline, "cache", cache)
     monkeypatch.setattr(bot_module.pipeline, "memory_worker", memory_worker)
@@ -294,21 +335,72 @@ async def test_attachment_descriptions_feed_rag_query_and_memory_enqueue(bot_mod
     monkeypatch.setattr(bot_module.pipeline, "vector_memory", vector_memory)
     monkeypatch.setattr(
         bot_module.pipeline,
-        "describe_attachments",
-        AsyncMock(return_value=AttachmentProcessingResult(descriptions=image_descriptions)),
+        "prepare_attachments",
+        AsyncMock(return_value=prepared),
+    )
+    monkeypatch.setattr(
+        bot_module.pipeline,
+        "describe_prepared_attachments",
+        describe_prepared,
     )
     monkeypatch.setattr(bot_module.pipeline, "send_reply", send_reply)
 
     await bot_module.on_message(message)
 
+    assert "[friend pasted an image into the chat] [Image: cat on couch]" in llm.ask_bouncer.await_args.args[0]
     assert len(cache.added) == 1
     cached_message = cache.added[0]
-    assert cached_message.content == "[friend pasted an image into the chat]\n[Image: a cat sleeping on a couch]"
+    assert cached_message.content == (
+        "[friend pasted an image into the chat]\n"
+        "[Image: a cat sleeping on a couch with its paws tucked under its body]"
+    )
     vector_memory.query.assert_awaited_once_with(
-        "[friend pasted an image into the chat]\n[Image: a cat sleeping on a couch]",
+        "[friend pasted an image into the chat]\n"
+        "[Image: a cat sleeping on a couch with its paws tucked under its body]",
         server_id=message.guild.id,
     )
-    assert memory_worker.calls == [(message, image_descriptions)]
+    assert memory_worker.calls == [(message, detail_descriptions)]
+
+
+@pytest.mark.asyncio
+async def test_attachment_no_reply_path_keeps_router_caption_for_cache_and_memory(bot_module, monkeypatch):
+    message = make_message(content="")
+    cache = FakeCache()
+    memory_worker = FakeMemoryWorker()
+    prepared = SimpleNamespace(attachments=[SimpleNamespace(image_bytes=b"bytes")])
+    router_descriptions = ["cat on couch"]
+    llm = SimpleNamespace(
+        ask_bouncer=AsyncMock(
+            return_value=SimpleNamespace(
+                should_respond=False,
+                use_tool=False,
+                recommended_tool=None,
+                tool_parameters=None,
+                reason="not addressed to sandy",
+            )
+        ),
+        ask_brain=AsyncMock(),
+    )
+
+    monkeypatch.setattr(bot_module.pipeline, "cache", cache)
+    monkeypatch.setattr(bot_module.pipeline, "memory_worker", memory_worker)
+    monkeypatch.setattr(bot_module.pipeline, "llm", llm)
+    monkeypatch.setattr(
+        bot_module.pipeline,
+        "prepare_attachments",
+        AsyncMock(return_value=prepared),
+    )
+    monkeypatch.setattr(
+        bot_module.pipeline,
+        "describe_prepared_attachments",
+        AsyncMock(return_value=AttachmentProcessingResult(descriptions=router_descriptions)),
+    )
+
+    await bot_module.on_message(message)
+
+    llm.ask_brain.assert_not_awaited()
+    assert cache.added[0].content == "[friend pasted an image into the chat]\n[Image: cat on couch]"
+    assert memory_worker.calls == [(message, router_descriptions)]
 
 
 @pytest.mark.asyncio
@@ -337,7 +429,16 @@ async def test_attachment_fallbacks_are_injected_when_image_cannot_be_inspected(
     monkeypatch.setattr(bot_module.pipeline, "vector_memory", vector_memory)
     monkeypatch.setattr(
         bot_module.pipeline,
-        "describe_attachments",
+        "prepare_attachments",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                attachments=[],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        bot_module.pipeline,
+        "describe_prepared_attachments",
         AsyncMock(
             return_value=AttachmentProcessingResult(
                 descriptions=[fallback],
@@ -389,7 +490,12 @@ async def test_steam_tool_skips_rag_query(bot_module, monkeypatch):
     monkeypatch.setattr(bot_module.pipeline, "tools_module", tools)
     monkeypatch.setattr(
         bot_module.pipeline,
-        "describe_attachments",
+        "prepare_attachments",
+        AsyncMock(return_value=SimpleNamespace(attachments=[])),
+    )
+    monkeypatch.setattr(
+        bot_module.pipeline,
+        "describe_prepared_attachments",
         AsyncMock(return_value=AttachmentProcessingResult(descriptions=[])),
     )
     monkeypatch.setattr(bot_module.pipeline, "send_reply", send_reply)

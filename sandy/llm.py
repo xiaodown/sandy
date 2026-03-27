@@ -81,14 +81,17 @@ _BRAIN_NUM_CTX     = int(os.getenv("BRAIN_NUM_CTX", "8192"))
 _BOUNCER_NUM_CTX   = int(os.getenv("BOUNCER_NUM_CTX", "8192"))
 _TAGGER_NUM_CTX    = int(os.getenv("TAGGER_NUM_CTX", "4096"))
 _SUMMARIZER_NUM_CTX = int(os.getenv("SUMMARIZER_NUM_CTX", "4096"))
-_VISION_NUM_CTX    = int(os.getenv("VISION_NUM_CTX", "8192"))
-_VISION_NUM_PREDICT = int(os.getenv("VISION_NUM_PREDICT", "384"))
+_VISION_NUM_CTX    = int(os.getenv("VISION_NUM_CTX", "4096"))
+_VISION_NUM_PREDICT = int(os.getenv("VISION_NUM_PREDICT", "224"))
+_VISION_ROUTER_NUM_CTX = int(os.getenv("VISION_ROUTER_NUM_CTX", "2048"))
+_VISION_ROUTER_NUM_PREDICT = int(os.getenv("VISION_ROUTER_NUM_PREDICT", "48"))
 _PREWARM_NUM_CTX   = int(os.getenv("PREWARM_NUM_CTX", str(_BOUNCER_NUM_CTX)))
 
 # Vision model — describes image attachments. Defaults to brain model so no extra
 # VRAM is consumed. Override with VISION_MODEL in .env if you ever want a dedicated
 # vision model (e.g. llava, minicpm-v, etc.).
 _VISION_MODEL = os.getenv("VISION_MODEL", None)  # resolved below after _BRAIN_MODEL is set
+_VISION_ROUTER_MODEL = os.getenv("VISION_ROUTER_MODEL", None)
 
 # How long ollama keeps a model loaded in VRAM after the last request.
 # Sandy defaults to 1 hour because measured idle power draw stayed low even
@@ -103,6 +106,8 @@ _KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "1h")
 _BOUNCER_TEMPERATURE    = float(os.getenv("BOUNCER_TEMPERATURE", "0.1"))
 _TAGGER_TEMPERATURE     = float(os.getenv("TAGGER_TEMPERATURE", "0.1"))
 _SUMMARIZER_TEMPERATURE = float(os.getenv("SUMMARIZER_TEMPERATURE", "0.1"))
+_VISION_TEMPERATURE = float(os.getenv("VISION_TEMPERATURE", "0.3"))
+_VISION_ROUTER_TEMPERATURE = float(os.getenv("VISION_ROUTER_TEMPERATURE", "0.1"))
 
 
 # ---------------------------------------------------------------------------
@@ -348,33 +353,33 @@ class OllamaInterface:
     # Vision — describe image attachments
     # ------------------------------------------------------------------
 
-    async def ask_vision(self, image_bytes: bytes) -> Optional[str]:
-        """Generate a plain factual description of an image.
-
-        Uses VISION_MODEL (defaults to BRAIN_MODEL if not set in .env).
-        System prompt is deliberately sterile — no Sandy personality leaks
-        into descriptions. This is raw context, not Sandy's voice.
-
-        image_bytes — raw bytes of the image (JPEG, PNG, GIF, WebP).
-
-        Returns the description string, or None on error.
-        """
-        prompt = SandyPrompt.vision_prompt()
-        # Resolve at call time in case _BRAIN_MODEL was overridden via env.
-        model = _VISION_MODEL or _BRAIN_MODEL
+    async def _ask_vision(
+        self,
+        image_bytes: bytes,
+        *,
+        prompt,
+        model: str,
+        num_ctx: int,
+        num_predict: int,
+        temperature: float | None = None,
+    ) -> Optional[str]:
         try:
             async with self._lock:
+                options = {
+                    "num_ctx": num_ctx,
+                    "num_predict": num_predict,
+                }
+                if temperature is not None:
+                    options["temperature"] = temperature
                 response = await self._client.chat(
                     model=model,
                     messages=[
                         {"role": "system", "content": prompt.system},
                         {"role": "user",   "content": prompt.user, "images": [image_bytes]},
                     ],
+                    think=False,
                     keep_alive=_KEEP_ALIVE,
-                    options={
-                        "num_ctx": _VISION_NUM_CTX,
-                        "num_predict": _VISION_NUM_PREDICT,
-                    },
+                    options=options,
                 )
             desc = (response.message.content or "").strip()
             logger.debug("Vision → %d chars", len(desc))
@@ -382,6 +387,32 @@ class OllamaInterface:
         except Exception as exc:
             logger.error("Vision error: %s", exc)
             return None
+
+    async def ask_vision_router(self, image_bytes: bytes) -> Optional[str]:
+        """Generate a very short routing caption for the bouncer path."""
+        prompt = SandyPrompt.vision_router_prompt()
+        model = _VISION_ROUTER_MODEL or _VISION_MODEL or _BRAIN_MODEL
+        return await self._ask_vision(
+            image_bytes,
+            prompt=prompt,
+            model=model,
+            num_ctx=_VISION_ROUTER_NUM_CTX,
+            num_predict=_VISION_ROUTER_NUM_PREDICT,
+            temperature=_VISION_ROUTER_TEMPERATURE,
+        )
+
+    async def ask_vision(self, image_bytes: bytes) -> Optional[str]:
+        """Generate a richer factual description of an image for brain grounding."""
+        prompt = SandyPrompt.vision_detail_prompt()
+        model = _VISION_MODEL or _BRAIN_MODEL
+        return await self._ask_vision(
+            image_bytes,
+            prompt=prompt,
+            model=model,
+            num_ctx=_VISION_NUM_CTX,
+            num_predict=_VISION_NUM_PREDICT,
+            temperature=_VISION_TEMPERATURE,
+        )
 
     # ------------------------------------------------------------------
     # Bouncer — should Sandy respond?
