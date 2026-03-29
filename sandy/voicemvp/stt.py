@@ -46,6 +46,13 @@ class FasterWhisperTranscriber:
         )
         directories: list[Path] = []
         for package_name in package_names:
+            # Note: for future integration with sandy's main code - we can 
+            # check to see if these libs exist in the linux shared library cache
+            # (i.e. installed as root, or someone munged LD_LIBRARY_PATH when invoking
+            # the bot), and if not, fall back to the find_spec and go digging in 
+            # site-packages.  That would be cleaner if still slightly cursed, without
+            # making root access an absolute requirement for installing prereqs for
+            # the bot.
             spec = importlib.util.find_spec(package_name)
             if spec is None or not spec.submodule_search_locations:
                 continue

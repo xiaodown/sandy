@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import audioop
 from collections import deque
 import contextlib
 from dataclasses import dataclass
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import io
 import logging
 import os
 from pathlib import Path
@@ -27,12 +29,14 @@ from discord.ext import voice_recv
 from dotenv import load_dotenv
 
 from .stt import FasterWhisperTranscriber
+from .tts import QwenTtsConfig, QwenVoiceDesignTts, pcm_bytes_to_audio_source
 
 load_dotenv()
 discord.opus._load_default()
 
 logger = logging.getLogger("sandy.voicemvp")
 CAPTURES_DIR = Path(__file__).resolve().parent / "captures"
+TEST_AUDIO_PATH = Path(__file__).resolve().parent / "file_example_WAV_2MG.wav"
 WAV_CHANNELS = 2
 WAV_SAMPLE_WIDTH = 2
 WAV_SAMPLE_RATE = 48_000
@@ -58,13 +62,26 @@ class VoiceMvpConfig:
     stt_device: str = "cuda"
     stt_compute_type: str = "float16"
     stt_language: str | None = "en"
+    tts_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+    tts_language: str = "English"
+    tts_instruct: str = (
+        "Voice Identity: warm, mid-range, female-coded, calm and slightly amused, "
+        "natural and conversational, medium speaking pace, clear diction, gentle "
+        "dry humor, not cutesy, not breathy, not theatrical."
+    )
+    tts_device_map: str = "cuda:0"
+    tts_dtype: str = "bfloat16"
+    tts_attn_implementation: str = "sdpa"
+    tts_max_new_tokens: int = 2048
 
     @property
     def help_text(self) -> str:
         return (
             "Voice MVP commands:\n"
             f"  {self.prefix}{self.join_command} [voice channel name]\n"
-            f"  {self.prefix}{self.leave_command}\n\n"
+            f"  {self.prefix}{self.leave_command}\n"
+            f"  {self.prefix}playtest\n"
+            f"  {self.prefix}say <text>\n\n"
             "If you omit the channel name, Sandy uses your current voice channel."
         )
 
@@ -84,6 +101,20 @@ def build_config(*, test_mode: bool = False) -> VoiceMvpConfig:
     stt_device = os.getenv("VOICE_MVP_STT_DEVICE", "cuda")
     stt_compute_type = os.getenv("VOICE_MVP_STT_COMPUTE_TYPE", "float16")
     stt_language = os.getenv("VOICE_MVP_STT_LANGUAGE", "en").strip() or None
+    tts_model = os.getenv("VOICE_MVP_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign")
+    tts_language = os.getenv("VOICE_MVP_TTS_LANGUAGE", "English").strip() or "English"
+    tts_instruct = os.getenv(
+        "VOICE_MVP_TTS_INSTRUCT",
+        (
+            "Voice Identity: warm, mid-range, female-coded, calm and slightly amused, "
+            "natural and conversational, medium speaking pace, clear diction, gentle "
+            "dry humor, not cutesy, not breathy, not theatrical."
+        ),
+    ).strip()
+    tts_device_map = os.getenv("VOICE_MVP_TTS_DEVICE_MAP", "cuda:0")
+    tts_dtype = os.getenv("VOICE_MVP_TTS_DTYPE", "bfloat16")
+    tts_attn_implementation = os.getenv("VOICE_MVP_TTS_ATTN_IMPLEMENTATION", "sdpa")
+    tts_max_new_tokens = int(os.getenv("VOICE_MVP_TTS_MAX_NEW_TOKENS", "2048"))
     return VoiceMvpConfig(
         token=token,
         prefix=prefix,
@@ -94,6 +125,13 @@ def build_config(*, test_mode: bool = False) -> VoiceMvpConfig:
         stt_device=stt_device,
         stt_compute_type=stt_compute_type,
         stt_language=stt_language,
+        tts_model=tts_model,
+        tts_language=tts_language,
+        tts_instruct=tts_instruct,
+        tts_device_map=tts_device_map,
+        tts_dtype=tts_dtype,
+        tts_attn_implementation=tts_attn_implementation,
+        tts_max_new_tokens=tts_max_new_tokens,
     )
 
 
@@ -451,6 +489,17 @@ class VoiceMvpClient(discord.Client):
             compute_type=config.stt_compute_type,
             language=config.stt_language,
         )
+        self.tts = QwenVoiceDesignTts(
+            QwenTtsConfig(
+                model_name=config.tts_model,
+                language=config.tts_language,
+                instruct=config.tts_instruct,
+                device_map=config.tts_device_map,
+                dtype=config.tts_dtype,
+                attn_implementation=config.tts_attn_implementation,
+                max_new_tokens=config.tts_max_new_tokens,
+            )
+        )
         self._stt_queue: asyncio.Queue[CaptureJob] = asyncio.Queue()
         self._stt_worker: asyncio.Task | None = None
 
@@ -469,6 +518,57 @@ class VoiceMvpClient(discord.Client):
         )
         logger.info(
             "Voice MVP is isolated from Sandy's text pipeline, logs DB, Recall, and Chroma",
+        )
+
+    def _build_test_audio_source(self) -> discord.AudioSource:
+        if not TEST_AUDIO_PATH.exists():
+            raise FileNotFoundError(f"Missing test audio file: {TEST_AUDIO_PATH}")
+
+        with wave.open(str(TEST_AUDIO_PATH), "rb") as wav_file:
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            sample_rate = wav_file.getframerate()
+            pcm = wav_file.readframes(wav_file.getnframes())
+
+        if sample_width != 2:
+            raise ValueError(
+                f"Unsupported test WAV sample width: expected 16-bit PCM, got {sample_width * 8}-bit",
+            )
+
+        # discord.py's raw PCM path wants 16-bit 48kHz stereo. This keeps the
+        # spike self-contained for a local test WAV without forcing ffmpeg to be
+        # installed just to prove outbound playback works.
+        if channels == 1:
+            pcm = audioop.tostereo(pcm, sample_width, 1, 1)
+            channels = 2
+        elif channels != 2:
+            raise ValueError(f"Unsupported test WAV channel count: {channels}")
+
+        if sample_rate != WAV_SAMPLE_RATE:
+            pcm, _ = audioop.ratecv(
+                pcm,
+                sample_width,
+                channels,
+                sample_rate,
+                WAV_SAMPLE_RATE,
+                None,
+            )
+
+        return discord.PCMAudio(io.BytesIO(pcm))
+
+    def _on_playback_finished(self, guild_name: str, channel_name: str, error: Exception | None) -> None:
+        if error is not None:
+            logger.error(
+                "Playback finished with error: guild=%s channel=%s error=%r",
+                guild_name,
+                channel_name,
+                error,
+            )
+            return
+        logger.info(
+            "Playback finished cleanly: guild=%s channel=%s",
+            guild_name,
+            channel_name,
         )
 
     def _attach_receive_probe(self, voice_client: voice_recv.VoiceRecvClient) -> None:
@@ -547,6 +647,12 @@ class VoiceMvpClient(discord.Client):
             return
         if verb == self.config.leave_command:
             await self._handle_leave(message)
+            return
+        if verb == "playtest":
+            await self._handle_playtest(message)
+            return
+        if verb == "say":
+            await self._handle_say(message, arg)
             return
         if verb == "voicehelp":
             await message.channel.send(self.config.help_text)
@@ -633,6 +739,108 @@ class VoiceMvpClient(discord.Client):
             voice_client.stop_listening()
         await voice_client.disconnect(force=True)
         await message.channel.send(f"Left `{channel_name}`.")
+
+    async def _handle_playtest(self, message: discord.Message) -> None:
+        voice_client = discord.utils.get(self.voice_clients, guild=message.guild)
+        if voice_client is None or not voice_client.is_connected():
+            await message.channel.send("Not connected to a voice channel in this guild.")
+            return
+        if voice_client.channel is None:
+            await message.channel.send("Voice client is connected but has no active channel.")
+            return
+        if voice_client.is_playing():
+            await message.channel.send("Already playing audio.")
+            return
+
+        try:
+            source = self._build_test_audio_source()
+        except FileNotFoundError:
+            logger.exception("Playtest audio file is missing")
+            await message.channel.send("Test audio file is missing.")
+            return
+        except Exception:
+            logger.exception("Failed to prepare playtest audio source")
+            await message.channel.send("Failed to prepare the test audio source.")
+            return
+
+        logger.info(
+            "Starting playtest: guild=%s channel=%s file=%s",
+            message.guild.name,
+            voice_client.channel.name,
+            TEST_AUDIO_PATH.name,
+        )
+        try:
+            voice_client.play(
+                source,
+                after=lambda error: self._on_playback_finished(
+                    message.guild.name,
+                    voice_client.channel.name if voice_client.channel else "unknown",
+                    error,
+                ),
+            )
+        except Exception:
+            logger.exception("Playtest playback failed to start")
+            await message.channel.send("Failed to start test audio playback.")
+            return
+
+        await message.channel.send(f"Playing `{TEST_AUDIO_PATH.name}` in `{voice_client.channel.name}`.")
+
+    async def _handle_say(self, message: discord.Message, text: str) -> None:
+        text = text.strip()
+        if not text:
+            await message.channel.send("Usage: `!say <text>`")
+            return
+
+        voice_client = discord.utils.get(self.voice_clients, guild=message.guild)
+        if voice_client is None or not voice_client.is_connected():
+            await message.channel.send("Not connected to a voice channel in this guild.")
+            return
+        if voice_client.channel is None:
+            await message.channel.send("Voice client is connected but has no active channel.")
+            return
+        if voice_client.is_playing():
+            await message.channel.send("Already playing audio.")
+            return
+
+        logger.info(
+            "Starting TTS synthesis: guild=%s channel=%s text=%r model=%s language=%s",
+            message.guild.name,
+            voice_client.channel.name,
+            text,
+            self.config.tts_model,
+            self.config.tts_language,
+        )
+
+        try:
+            pcm_bytes, sample_rate = await asyncio.to_thread(self.tts.synthesize_bytes, text)
+            source = pcm_bytes_to_audio_source(pcm_bytes)
+        except Exception:
+            logger.exception("TTS synthesis failed")
+            await message.channel.send("TTS synthesis failed.")
+            return
+
+        logger.info(
+            "Starting TTS playback: guild=%s channel=%s pcm_bytes=%s sample_rate=%s",
+            message.guild.name,
+            voice_client.channel.name,
+            len(pcm_bytes),
+            sample_rate,
+        )
+        try:
+            voice_client.play(
+                source,
+                after=lambda error: self._on_playback_finished(
+                    message.guild.name,
+                    voice_client.channel.name if voice_client.channel else "unknown",
+                    error,
+                ),
+            )
+        except Exception:
+            logger.exception("TTS playback failed to start")
+            await message.channel.send("Failed to start TTS playback.")
+            return
+
+        await message.channel.send(f"Speaking in `{voice_client.channel.name}`.")
 
 
 async def run_voice_mvp(*, test_mode: bool = False) -> int:
