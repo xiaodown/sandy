@@ -13,6 +13,8 @@ handover*
 # Test artifacts
 tests/.testdata/
 
+# voice spike artifacts that would just clutter up github
+sandy/voicemvp/captures/*
 
 
 # Byte-compiled / optimized / DLL files

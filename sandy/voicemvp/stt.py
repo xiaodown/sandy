@@ -39,17 +39,26 @@ class FasterWhisperTranscriber:
         self._resolved_compute_type: str | None = None
 
     def _cuda_library_dirs(self) -> list[Path]:
-        spec = importlib.util.find_spec("nvidia")
-        if spec is None or not spec.submodule_search_locations:
-            return []
+        package_names = (
+            "nvidia.cublas",
+            "nvidia.cudnn",
+            "nvidia.cuda_nvrtc",
+        )
+        directories: list[Path] = []
+        for package_name in package_names:
+            spec = importlib.util.find_spec(package_name)
+            if spec is None or not spec.submodule_search_locations:
+                continue
 
-        base = Path(next(iter(spec.submodule_search_locations)))
-        candidates = [
-            base / "cublas" / "lib",
-            base / "cudnn" / "lib",
-            base / "cuda_nvrtc" / "lib",
-        ]
-        return [path for path in candidates if path.exists()]
+            # The pip-installed NVIDIA CUDA wheels use namespace packages, so
+            # modules like nvidia.cublas.lib often have no __file__. Resolve
+            # the package root from submodule_search_locations instead and then
+            # point ctranslate2 at the sibling lib/ directory explicitly.
+            directory = Path(next(iter(spec.submodule_search_locations))).resolve() / "lib"
+            if directory.exists() and directory not in directories:
+                directories.append(directory)
+
+        return directories
 
     def _try_preload_cuda_runtime(self) -> None:
         if self.device != "cuda":
@@ -85,50 +94,38 @@ class FasterWhisperTranscriber:
         self._try_preload_cuda_runtime()
         from faster_whisper import WhisperModel
 
-        attempts = [(self.device, self.compute_type)]
-        if self.device != "cpu":
-            attempts.append(("cpu", "int8"))
+        started = time.perf_counter()
+        logger.info(
+            "Loading faster-whisper model=%s device=%s compute_type=%s",
+            self.model_name,
+            self.device,
+            self.compute_type,
+        )
+        try:
+            model = WhisperModel(
+                self.model_name,
+                device=self.device,
+                compute_type=self.compute_type,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to load faster-whisper on configured device={self.device!r} "
+                f"compute_type={self.compute_type!r}. "
+                "This voice spike assumes the configured runtime libraries are present."
+            ) from exc
 
-        last_error: Exception | None = None
-        for device, compute_type in attempts:
-            try:
-                started = time.perf_counter()
-                logger.info(
-                    "Loading faster-whisper model=%s device=%s compute_type=%s",
-                    self.model_name,
-                    device,
-                    compute_type,
-                )
-                model = WhisperModel(
-                    self.model_name,
-                    device=device,
-                    compute_type=compute_type,
-                )
-                elapsed = time.perf_counter() - started
-                self._model = model
-                self._resolved_device = device
-                self._resolved_compute_type = compute_type
-                logger.info(
-                    "Loaded faster-whisper model=%s device=%s compute_type=%s in %.2fs",
-                    self.model_name,
-                    device,
-                    compute_type,
-                    elapsed,
-                )
-                return model
-            except Exception as exc:
-                last_error = exc
-                logger.warning(
-                    "Failed to load faster-whisper model=%s device=%s compute_type=%s: %r",
-                    self.model_name,
-                    device,
-                    compute_type,
-                    exc,
-                )
-
-        raise RuntimeError(
-            f"Failed to load faster-whisper model {self.model_name!r}"
-        ) from last_error
+        elapsed = time.perf_counter() - started
+        self._model = model
+        self._resolved_device = self.device
+        self._resolved_compute_type = self.compute_type
+        logger.info(
+            "Loaded faster-whisper model=%s device=%s compute_type=%s in %.2fs",
+            self.model_name,
+            self.device,
+            self.compute_type,
+            elapsed,
+        )
+        return model
 
     def transcribe_file_sync(self, path: Path) -> TranscriptResult:
         model = self._load_model()

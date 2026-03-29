@@ -605,27 +605,11 @@ wheels = [
 ]
 
 [[package]]
-name = "discord"
-version = "2.3.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "discord-py" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/7e/9f/0763429949416aeff9c6f33051270831b72e5582273acd28053b9b949462/discord-2.3.2.tar.gz", hash = "sha256:cc1ee2dbe6df218ca51519af355b97e87309f8230f58c7f34885feb8e8a76145", size = 1137, upload-time = "2023-08-10T21:45:07.93Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2d/38/d91ac49e8169b6c0f724f7aad26704eec07c4ecf31e067ca3d46a87e33d6/discord-2.3.2-py3-none-any.whl", hash = "sha256:d7959418799dd3b1e896685812d880169c193468b061b3431fa2a4664febd3da", size = 1132, upload-time = "2023-08-10T21:45:06.334Z" },
-]
-
-[[package]]
 name = "discord-ext-voice-recv"
-version = "0.5.2a179"
-source = { registry = "https://pypi.org/simple" }
+version = "0.5.3a185"
+source = { git = "https://github.com/rdphillips7/discord-ext-voice-recv.git?rev=ddd28601fe556f585b869e215f29c8236b95f88f#ddd28601fe556f585b869e215f29c8236b95f88f" }
 dependencies = [
     { name = "discord-py", extra = ["voice"] },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/da/4e/f52f69b4854b817b50d5998f1f470e42f966af9ac47cd853736f6c501a3f/discord_ext_voice_recv-0.5.2a179.tar.gz", hash = "sha256:6cb8f5ff60c3885020e5ebd879323dc97ebb0745788f3778a14ef31810f848a8", size = 39805, upload-time = "2025-06-18T04:56:39.876Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/bc/65/d3a9d555cb2baaab6f8081d64d4d423688ba28ff7ae6608c374d06add3f6/discord_ext_voice_recv-0.5.2a179-py3-none-any.whl", hash = "sha256:f3fa65f2c1591bef2382aa39f3ebc25d6751b405aef5b5d113dfb452640f29fc", size = 41041, upload-time = "2025-06-18T04:56:38.785Z" },
 ]
 
 [[package]]
@@ -2261,8 +2245,8 @@ version = "0.2.0"
 source = { virtual = "." }
 dependencies = [
     { name = "chromadb" },
-    { name = "discord" },
     { name = "discord-ext-voice-recv" },
+    { name = "discord-py", extra = ["voice"] },
     { name = "faster-whisper" },
     { name = "httpx" },
     { name = "nvidia-cublas-cu12" },
@@ -2284,8 +2268,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "chromadb", specifier = ">=0.6.0" },
-    { name = "discord", specifier = ">=2.3.2" },
-    { name = "discord-ext-voice-recv" },
+    { name = "discord-ext-voice-recv", git = "https://github.com/rdphillips7/discord-ext-voice-recv.git?rev=ddd28601fe556f585b869e215f29c8236b95f88f" },
+    { name = "discord-py", extras = ["voice"], specifier = ">=2.7.1" },
     { name = "faster-whisper" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "nvidia-cublas-cu12" },
