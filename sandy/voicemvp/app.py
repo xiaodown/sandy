@@ -29,7 +29,7 @@ from discord.ext import voice_recv
 from dotenv import load_dotenv
 
 from .stt import FasterWhisperTranscriber
-from .tts import QwenTtsConfig, QwenVoiceDesignTts, pcm_bytes_to_audio_source
+from .tts import TtsServiceClient, TtsServiceConfig, wav_bytes_to_audio_source
 
 load_dotenv()
 discord.opus._load_default()
@@ -62,17 +62,8 @@ class VoiceMvpConfig:
     stt_device: str = "cuda"
     stt_compute_type: str = "float16"
     stt_language: str | None = "en"
-    tts_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
-    tts_language: str = "English"
-    tts_instruct: str = (
-        "Voice Identity: warm, mid-range, female-coded, calm and slightly amused, "
-        "natural and conversational, medium speaking pace, clear diction, gentle "
-        "dry humor, not cutesy, not breathy, not theatrical."
-    )
-    tts_device_map: str = "cuda:0"
-    tts_dtype: str = "bfloat16"
-    tts_attn_implementation: str = "sdpa"
-    tts_max_new_tokens: int = 2048
+    tts_service_url: str = "http://127.0.0.1:8777"
+    tts_service_timeout_seconds: float = 180.0
 
     @property
     def help_text(self) -> str:
@@ -101,20 +92,8 @@ def build_config(*, test_mode: bool = False) -> VoiceMvpConfig:
     stt_device = os.getenv("VOICE_MVP_STT_DEVICE", "cuda")
     stt_compute_type = os.getenv("VOICE_MVP_STT_COMPUTE_TYPE", "float16")
     stt_language = os.getenv("VOICE_MVP_STT_LANGUAGE", "en").strip() or None
-    tts_model = os.getenv("VOICE_MVP_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign")
-    tts_language = os.getenv("VOICE_MVP_TTS_LANGUAGE", "English").strip() or "English"
-    tts_instruct = os.getenv(
-        "VOICE_MVP_TTS_INSTRUCT",
-        (
-            "Voice Identity: warm, mid-range, female-coded, calm and slightly amused, "
-            "natural and conversational, medium speaking pace, clear diction, gentle "
-            "dry humor, not cutesy, not breathy, not theatrical."
-        ),
-    ).strip()
-    tts_device_map = os.getenv("VOICE_MVP_TTS_DEVICE_MAP", "cuda:0")
-    tts_dtype = os.getenv("VOICE_MVP_TTS_DTYPE", "bfloat16")
-    tts_attn_implementation = os.getenv("VOICE_MVP_TTS_ATTN_IMPLEMENTATION", "sdpa")
-    tts_max_new_tokens = int(os.getenv("VOICE_MVP_TTS_MAX_NEW_TOKENS", "2048"))
+    tts_service_url = os.getenv("VOICE_MVP_TTS_SERVICE_URL", "http://127.0.0.1:8777")
+    tts_service_timeout_seconds = float(os.getenv("VOICE_MVP_TTS_SERVICE_TIMEOUT_SECONDS", "180"))
     return VoiceMvpConfig(
         token=token,
         prefix=prefix,
@@ -125,13 +104,8 @@ def build_config(*, test_mode: bool = False) -> VoiceMvpConfig:
         stt_device=stt_device,
         stt_compute_type=stt_compute_type,
         stt_language=stt_language,
-        tts_model=tts_model,
-        tts_language=tts_language,
-        tts_instruct=tts_instruct,
-        tts_device_map=tts_device_map,
-        tts_dtype=tts_dtype,
-        tts_attn_implementation=tts_attn_implementation,
-        tts_max_new_tokens=tts_max_new_tokens,
+        tts_service_url=tts_service_url,
+        tts_service_timeout_seconds=tts_service_timeout_seconds,
     )
 
 
@@ -489,15 +463,10 @@ class VoiceMvpClient(discord.Client):
             compute_type=config.stt_compute_type,
             language=config.stt_language,
         )
-        self.tts = QwenVoiceDesignTts(
-            QwenTtsConfig(
-                model_name=config.tts_model,
-                language=config.tts_language,
-                instruct=config.tts_instruct,
-                device_map=config.tts_device_map,
-                dtype=config.tts_dtype,
-                attn_implementation=config.tts_attn_implementation,
-                max_new_tokens=config.tts_max_new_tokens,
+        self.tts = TtsServiceClient(
+            TtsServiceConfig(
+                base_url=config.tts_service_url,
+                timeout_seconds=config.tts_service_timeout_seconds,
             )
         )
         self._stt_queue: asyncio.Queue[CaptureJob] = asyncio.Queue()
@@ -803,28 +772,26 @@ class VoiceMvpClient(discord.Client):
             return
 
         logger.info(
-            "Starting TTS synthesis: guild=%s channel=%s text=%r model=%s language=%s",
+            "Starting TTS synthesis: guild=%s channel=%s text=%r service=%s",
             message.guild.name,
             voice_client.channel.name,
             text,
-            self.config.tts_model,
-            self.config.tts_language,
+            self.config.tts_service_url,
         )
 
         try:
-            pcm_bytes, sample_rate = await asyncio.to_thread(self.tts.synthesize_bytes, text)
-            source = pcm_bytes_to_audio_source(pcm_bytes)
+            wav_bytes = await asyncio.to_thread(self.tts.synthesize_bytes, text)
+            source = wav_bytes_to_audio_source(wav_bytes)
         except Exception:
             logger.exception("TTS synthesis failed")
             await message.channel.send("TTS synthesis failed.")
             return
 
         logger.info(
-            "Starting TTS playback: guild=%s channel=%s pcm_bytes=%s sample_rate=%s",
+            "Starting TTS playback: guild=%s channel=%s wav_bytes=%s",
             message.guild.name,
             voice_client.channel.name,
-            len(pcm_bytes),
-            sample_rate,
+            len(wav_bytes),
         )
         try:
             voice_client.play(
