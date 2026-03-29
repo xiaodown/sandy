@@ -64,6 +64,13 @@ class VoiceMvpConfig:
     stt_language: str | None = "en"
     tts_service_url: str = "http://127.0.0.1:8777"
     tts_service_timeout_seconds: float = 180.0
+    tts_language: str = "English"
+    tts_instruct: str = (
+        "Voice Identity: warm, mid-range, female-coded, calm and slightly amused, "
+        "natural and conversational, medium speaking pace, clear diction, gentle "
+        "dry humor, not cutesy, not breathy, not theatrical."
+    )
+    echo_stt_to_tts: bool = True
 
     @property
     def help_text(self) -> str:
@@ -94,6 +101,18 @@ def build_config(*, test_mode: bool = False) -> VoiceMvpConfig:
     stt_language = os.getenv("VOICE_MVP_STT_LANGUAGE", "en").strip() or None
     tts_service_url = os.getenv("VOICE_MVP_TTS_SERVICE_URL", "http://127.0.0.1:8777")
     tts_service_timeout_seconds = float(os.getenv("VOICE_MVP_TTS_SERVICE_TIMEOUT_SECONDS", "180"))
+    tts_language = os.getenv("VOICE_MVP_TTS_LANGUAGE", "English").strip() or "English"
+    tts_instruct = os.getenv(
+        "VOICE_MVP_TTS_INSTRUCT",
+        (
+            "Voice Identity: warm, mid-range, female-coded, calm and slightly amused, "
+            "natural and conversational, medium speaking pace, clear diction, gentle "
+            "dry humor, not cutesy, not breathy, not theatrical."
+        ),
+    ).strip()
+    echo_stt_to_tts = os.getenv("VOICE_MVP_ECHO_STT_TO_TTS", "true").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
     return VoiceMvpConfig(
         token=token,
         prefix=prefix,
@@ -106,6 +125,9 @@ def build_config(*, test_mode: bool = False) -> VoiceMvpConfig:
         stt_language=stt_language,
         tts_service_url=tts_service_url,
         tts_service_timeout_seconds=tts_service_timeout_seconds,
+        tts_language=tts_language,
+        tts_instruct=tts_instruct,
+        echo_stt_to_tts=echo_stt_to_tts,
     )
 
 
@@ -175,6 +197,7 @@ class ActiveUtterance:
 
 @dataclass(frozen=True, slots=True)
 class CaptureJob:
+    guild_id: int
     path: Path
     speaker_label: str
     ssrc: int
@@ -374,6 +397,7 @@ class UtteranceCaptureSink(voice_recv.AudioSink):
         if self._on_capture_saved is not None:
             self._on_capture_saved(
                 CaptureJob(
+                    guild_id=self.voice_client.guild.id,
                     path=capture_path,
                     speaker_label=active.speaker_label,
                     ssrc=ssrc,
@@ -467,15 +491,23 @@ class VoiceMvpClient(discord.Client):
             TtsServiceConfig(
                 base_url=config.tts_service_url,
                 timeout_seconds=config.tts_service_timeout_seconds,
+                default_instruct=config.tts_instruct,
+                default_language=config.tts_language,
             )
         )
         self._stt_queue: asyncio.Queue[CaptureJob] = asyncio.Queue()
         self._stt_worker: asyncio.Task | None = None
+        self._tts_queue: asyncio.Queue[tuple[int, str, str]] = asyncio.Queue()
+        self._tts_worker: asyncio.Task | None = None
 
     async def setup_hook(self) -> None:
         self._stt_worker = asyncio.create_task(
             self._run_stt_worker(),
             name="sandy-voicemvp-stt",
+        )
+        self._tts_worker = asyncio.create_task(
+            self._run_tts_worker(),
+            name="sandy-voicemvp-tts",
         )
 
     async def on_ready(self) -> None:
@@ -488,6 +520,13 @@ class VoiceMvpClient(discord.Client):
         logger.info(
             "Voice MVP is isolated from Sandy's text pipeline, logs DB, Recall, and Chroma",
         )
+
+    async def _warm_tts(self) -> None:
+        try:
+            await asyncio.to_thread(self.tts.warmup)
+            logger.info("TTS service warmup complete")
+        except Exception:
+            logger.exception("TTS service warmup failed")
 
     def _build_test_audio_source(self) -> discord.AudioSource:
         if not TEST_AUDIO_PATH.exists():
@@ -568,6 +607,64 @@ class VoiceMvpClient(discord.Client):
     def _enqueue_capture_job_from_thread(self, job: CaptureJob) -> None:
         self.loop.call_soon_threadsafe(self._stt_queue.put_nowait, job)
 
+    async def _enqueue_tts(self, guild_id: int, text: str, *, reason: str) -> None:
+        await self._tts_queue.put((guild_id, text, reason))
+
+    async def _run_tts_worker(self) -> None:
+        while True:
+            guild_id, text, reason = await self._tts_queue.get()
+            try:
+                guild = self.get_guild(guild_id)
+                if guild is None:
+                    logger.warning("TTS worker dropping text for unknown guild_id=%s", guild_id)
+                    continue
+
+                voice_client = discord.utils.get(self.voice_clients, guild=guild)
+                if voice_client is None or not voice_client.is_connected() or voice_client.channel is None:
+                    logger.warning(
+                        "TTS worker dropping text because no connected voice client exists: guild=%s reason=%s",
+                        guild.name,
+                        reason,
+                    )
+                    continue
+
+                while voice_client.is_playing():
+                    await asyncio.sleep(0.05)
+
+                logger.info(
+                    "TTS worker synthesizing: guild=%s channel=%s reason=%s text=%r",
+                    guild.name,
+                    voice_client.channel.name,
+                    reason,
+                    text,
+                )
+                wav_bytes = await asyncio.to_thread(
+                    self.tts.synthesize_bytes,
+                    text,
+                    instruct=self.config.tts_instruct,
+                    language=self.config.tts_language,
+                )
+                source = wav_bytes_to_audio_source(wav_bytes)
+                logger.info(
+                    "TTS worker playback start: guild=%s channel=%s reason=%s wav_bytes=%s",
+                    guild.name,
+                    voice_client.channel.name,
+                    reason,
+                    len(wav_bytes),
+                )
+                voice_client.play(
+                    source,
+                    after=lambda error: self._on_playback_finished(
+                        guild.name,
+                        voice_client.channel.name if voice_client.channel else "unknown",
+                        error,
+                    ),
+                )
+            except Exception:
+                logger.exception("TTS worker failed for guild_id=%s reason=%s", guild_id, reason)
+            finally:
+                self._tts_queue.task_done()
+
     async def _run_stt_worker(self) -> None:
         while True:
             job = await self._stt_queue.get()
@@ -590,6 +687,16 @@ class VoiceMvpClient(discord.Client):
                     result.compute_type,
                     result.text,
                 )
+                if (
+                    self.config.echo_stt_to_tts
+                    and result.text.strip()
+                    and job.path.name
+                ):
+                    await self._enqueue_tts(
+                        job.guild_id,
+                        result.text.strip(),
+                        reason=f"echo-stt:{job.path.name}",
+                    )
             except Exception:
                 logger.exception("STT failed for capture=%s", job.path)
             finally:
@@ -694,6 +801,7 @@ class VoiceMvpClient(discord.Client):
             type(voice_client).__name__,
         )
         self._attach_receive_probe(voice_client)
+        asyncio.create_task(self._warm_tts(), name="voicemvp-tts-warmup")
         await message.channel.send(f"Joined `{target_channel.name}`.")
 
     async def _handle_leave(self, message: discord.Message) -> None:
@@ -780,7 +888,12 @@ class VoiceMvpClient(discord.Client):
         )
 
         try:
-            wav_bytes = await asyncio.to_thread(self.tts.synthesize_bytes, text)
+            wav_bytes = await asyncio.to_thread(
+                self.tts.synthesize_bytes,
+                text,
+                instruct=self.config.tts_instruct,
+                language=self.config.tts_language,
+            )
             source = wav_bytes_to_audio_source(wav_bytes)
         except Exception:
             logger.exception("TTS synthesis failed")

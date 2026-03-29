@@ -39,6 +39,8 @@ class ServiceConfig:
 
 class SynthesizeRequest(BaseModel):
     text: str
+    instruct: str | None = None
+    language: str | None = None
 
 
 class QwenVoiceDesignService:
@@ -77,12 +79,21 @@ class QwenVoiceDesignService:
         logger.info("Loaded Qwen TTS model=%s", self.config.model_name)
         return self._model
 
-    def synthesize_wav_bytes(self, text: str) -> bytes:
+    def warmup(self) -> None:
+        self._load_model()
+
+    def synthesize_wav_bytes(
+        self,
+        text: str,
+        *,
+        instruct: str | None = None,
+        language: str | None = None,
+    ) -> bytes:
         model = self._load_model()
         wavs, sample_rate = model.generate_voice_design(
             text=text,
-            language=self.config.language,
-            instruct=self.config.instruct,
+            language=language or self.config.language,
+            instruct=instruct or self.config.instruct,
             max_new_tokens=self.config.max_new_tokens,
         )
         if not wavs:
@@ -122,13 +133,26 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.post("/warmup")
+    async def warmup() -> dict[str, str]:
+        try:
+            service.warmup()
+        except Exception as exc:
+            logger.exception("TTS warmup failed")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {"status": "warmed"}
+
     @app.post("/synthesize")
     async def synthesize(request: SynthesizeRequest) -> Response:
         text = request.text.strip()
         if not text:
             raise HTTPException(status_code=400, detail="text must not be empty")
         try:
-            wav_bytes = service.synthesize_wav_bytes(text)
+            wav_bytes = service.synthesize_wav_bytes(
+                text,
+                instruct=request.instruct.strip() if request.instruct else None,
+                language=request.language.strip() if request.language else None,
+            )
         except Exception as exc:
             logger.exception("TTS synthesis failed for text=%r", text)
             raise HTTPException(status_code=500, detail=str(exc)) from exc

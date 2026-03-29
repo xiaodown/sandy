@@ -17,16 +17,35 @@ DISCORD_PCM_SAMPLE_RATE = 48_000
 class TtsServiceConfig:
     base_url: str = "http://127.0.0.1:8777"
     timeout_seconds: float = 180.0
+    default_instruct: str | None = None
+    default_language: str | None = None
 
 
 class TtsServiceClient:
     def __init__(self, config: TtsServiceConfig) -> None:
         self.config = config
 
-    def synthesize_bytes(self, text: str) -> bytes:
+    def warmup(self) -> None:
+        response = httpx.post(
+            f"{self.config.base_url.rstrip('/')}/warmup",
+            timeout=self.config.timeout_seconds,
+        )
+        response.raise_for_status()
+
+    def synthesize_bytes(
+        self,
+        text: str,
+        *,
+        instruct: str | None = None,
+        language: str | None = None,
+    ) -> bytes:
         response = httpx.post(
             f"{self.config.base_url.rstrip('/')}/synthesize",
-            json={"text": text},
+            json={
+                "text": text,
+                "instruct": instruct if instruct is not None else self.config.default_instruct,
+                "language": language if language is not None else self.config.default_language,
+            },
             timeout=self.config.timeout_seconds,
         )
         response.raise_for_status()
