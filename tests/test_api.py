@@ -136,6 +136,7 @@ def test_api_service_status_and_gpu_payload(monkeypatch) -> None:
     status = service.status_payload()
 
     assert status["discord"]["connected"] is True
+    assert status["voice"]["active"] is False
     assert status["llm"]["busy"] is True
     assert status["current_turn"]["stage"] == "bouncer"
     assert status["last_bouncer_decision"]["should_respond"] is True

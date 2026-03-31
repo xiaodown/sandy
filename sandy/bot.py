@@ -110,7 +110,15 @@ async def on_message(message: discord.Message):
     if message.guild is None:
         # Bot doesn't respond to DMs
         return
+    if await pipeline.handle_control_message(message, bot_user=bot.user):
+        return
     await pipeline.handle_message(message, bot_user=bot.user)
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    """Event handler for voice roster changes relevant to an active session."""
+    pipeline.handle_voice_state_update(member, before, after, bot_user=bot.user)
 
 
 async def shutdown_background_work() -> None:

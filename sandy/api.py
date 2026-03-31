@@ -250,6 +250,7 @@ class ApiService:
         return {
             "mode": "test" if self.test_mode else "prod",
             "discord": runtime["discord"],
+            "voice": runtime["voice"],
             "current_turn": current_turn,
             "active_turn_count": len(active_turns),
             "memory_worker": runtime["memory_worker"],

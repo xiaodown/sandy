@@ -29,6 +29,19 @@ class BouncerDecisionSnapshot:
     recorded_at: float
 
 
+@dataclass(slots=True)
+class VoiceSnapshot:
+    active: bool
+    status: str
+    session_id: str | None
+    guild_id: int | None
+    guild_name: str | None
+    channel_id: int | None
+    channel_name: str | None
+    participant_names: list[str]
+    updated_at: float
+
+
 class RuntimeState:
     """Thread-safe snapshot state for the observability API."""
 
@@ -41,6 +54,17 @@ class RuntimeState:
         self._memory_queue_depth = 0
         self._memory_processing_message_id: int | None = None
         self._last_bouncer_decision: BouncerDecisionSnapshot | None = None
+        self._voice = VoiceSnapshot(
+            active=False,
+            status="idle",
+            session_id=None,
+            guild_id=None,
+            guild_name=None,
+            channel_id=None,
+            channel_name=None,
+            participant_names=[],
+            updated_at=time(),
+        )
 
     def set_discord_connected(self, connected: bool, *, user_name: str | None = None) -> None:
         with self._lock:
@@ -126,6 +150,31 @@ class RuntimeState:
                 recorded_at=time(),
             )
 
+    def set_voice_state(
+        self,
+        *,
+        active: bool,
+        status: str,
+        session_id: str | None = None,
+        guild_id: int | None = None,
+        guild_name: str | None = None,
+        channel_id: int | None = None,
+        channel_name: str | None = None,
+        participant_names: list[str] | None = None,
+    ) -> None:
+        with self._lock:
+            self._voice = VoiceSnapshot(
+                active=active,
+                status=status,
+                session_id=session_id,
+                guild_id=guild_id,
+                guild_name=guild_name,
+                channel_id=channel_id,
+                channel_name=channel_name,
+                participant_names=list(participant_names or []),
+                updated_at=time(),
+            )
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             active_turns = sorted(
@@ -162,6 +211,17 @@ class RuntimeState:
                     "user_name": self._discord_user,
                     "server_count": len(self._discord_servers),
                     "server_names": list(self._discord_servers),
+                },
+                "voice": {
+                    "active": self._voice.active,
+                    "status": self._voice.status,
+                    "session_id": self._voice.session_id,
+                    "guild_id": self._voice.guild_id,
+                    "guild_name": self._voice.guild_name,
+                    "channel_id": self._voice.channel_id,
+                    "channel_name": self._voice.channel_name,
+                    "participant_names": list(self._voice.participant_names),
+                    "updated_at": self._voice.updated_at,
                 },
                 "active_turns": active_turns,
                 "memory_worker": {

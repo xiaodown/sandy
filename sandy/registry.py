@@ -83,7 +83,29 @@ class Registry:
                 )
                 """
             )
+            self._ensure_user_nicknames_column(
+                conn,
+                "voice_admin",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
             conn.commit()
+
+    def _ensure_user_nicknames_column(
+        self,
+        conn: sqlite3.Connection,
+        column_name: str,
+        column_sql: str,
+    ) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(user_nicknames)")
+        }
+        if column_name in columns:
+            return
+        conn.execute(
+            f"ALTER TABLE user_nicknames ADD COLUMN {column_name} {column_sql}",
+        )
+        logger.info("Registry schema upgraded: added user_nicknames.%s", column_name)
 
     # ------------------------------------------------------------------
     # Presence checks
@@ -157,8 +179,12 @@ class Registry:
                 logger.info("New user seen: %s (%s)", message.author.name, message.author.id)
             # INSERT OR REPLACE so nickname changes are picked up over time
             conn.execute(
-                "INSERT OR REPLACE INTO user_nicknames (user_id, server_id, nickname) VALUES (?, ?, ?)",
-                (message.author.id, message.guild.id, message.author.nick)
+                """
+                INSERT INTO user_nicknames (user_id, server_id, nickname)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, server_id) DO UPDATE SET nickname = excluded.nickname
+                """,
+                (message.author.id, message.guild.id, message.author.nick),
             )
             conn.commit()
 
@@ -205,7 +231,7 @@ class Registry:
             if server_id is not None:
                 row = conn.execute(
                     """
-                    SELECT u.user_id, u.user_name, un.nickname, s.server_id, s.server_name
+                    SELECT u.user_id, u.user_name, un.nickname, un.voice_admin, s.server_id, s.server_name
                     FROM users u
                     LEFT JOIN user_nicknames un ON u.user_id = un.user_id AND un.server_id = ?
                     LEFT JOIN servers s ON un.server_id = s.server_id
@@ -219,3 +245,35 @@ class Registry:
                     (user_id,)
                 ).fetchone()
         return dict(row) if row is not None else None
+
+    def set_voice_admin(self, *, user_id: int, server_id: int, is_admin: bool) -> None:
+        with self._get_conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO users (user_id, user_name) VALUES (?, '')",
+                (user_id,),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO servers (server_id, server_name) VALUES (?, '')",
+                (server_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO user_nicknames (user_id, server_id, nickname, voice_admin)
+                VALUES (?, ?, NULL, ?)
+                ON CONFLICT(user_id, server_id) DO UPDATE SET voice_admin = excluded.voice_admin
+                """,
+                (user_id, server_id, 1 if is_admin else 0),
+            )
+            conn.commit()
+
+    def is_voice_admin(self, *, user_id: int, server_id: int) -> bool:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT voice_admin
+                FROM user_nicknames
+                WHERE user_id = ? AND server_id = ?
+                """,
+                (user_id, server_id),
+            ).fetchone()
+        return bool(row["voice_admin"]) if row is not None else False

@@ -15,14 +15,63 @@ The first integrated version should:
 - maintain a separate rolling voice-session context for the active voice channel
 - keep Sandy in at most one active voice chat globally
 - store voice transcripts conservatively and with explicit modality metadata
-- run the existing brain pipeline with a voice-specific input wrapper
-- run a small speech-render pass before TTS so spoken replies stay short and
-  natural
+- pause text replies while Sandy is in VC so voice latency wins cleanly
+- keep observing text channels while in VC and continue low-priority background
+  memory persistence for text turns
+- run the existing brain path with voice-specific prompt instructions instead of
+  a second speech-render model pass
+- skip the text bouncer and tool calls entirely for voice v1
+- coalesce newly completed human turns while Sandy is already generating or
+  speaking, then answer the resulting conversation block once she is free
 - speak the final reply back into VC
 
 This is the right stopping point for the spike and the right starting point for
-integration. Do not do streaming, barge-in, or a fully separate voice-brain
-persona path in v1.
+integration. Do not do streaming, barge-in, a second post-brain render pass, or
+a fully separate voice-brain persona path in v1.
+
+## Implementation Status
+
+As of 2026-03-31, the first integrated voice slice is no longer theoretical.
+The following pieces are implemented in Sandy Prime and have been live-tested in
+Discord:
+
+- `sandy.voice` package exists with capture, STT, TTS, session/history, and
+  manager/orchestration layers
+- admin-only `!join` / `!leave` works through the main bot
+- registry has per-(user, server) `voice_admin` support plus maintenance CLI
+  helpers to set and look up admins
+- one global active VC session is enforced
+- voice session participant tracking is wired through `on_voice_state_update`
+- text replies are paused while VC is active
+- voice uses separate rolling short-term history instead of text `Last10`
+- voice still pulls vector/RAG context into the brain path
+- voice transcripts and Sandy spoken replies are stored in vector memory, not
+  Recall
+- same-speaker STT fragments are stitched before reply with preroll capture kept
+- coalescing exists so completed human turns append while Sandy is busy instead
+  of spawning overlapping replies
+- TTS stays external over localhost HTTP
+- shutdown tears down voice state before the wider pipeline exits
+- voice state is visible in the observability API status output
+
+Live-test status:
+
+- end-to-end VC conversation now works: capture -> STT -> brain -> TTS ->
+  playback
+- earlier silent-failure bugs in response-task scheduling and memory-write
+  ordering were fixed
+- overly long spoken replies that caused TTS `500` failures were mitigated with
+  voice-specific prompt constraints plus a deterministic reply sanitizer /
+  fallback shortening pass before TTS
+
+Known remaining work before calling v1 "done":
+
+- make a focused prompt pass for spoken-language quality
+- reduce chat-style abbreviations / acronyms in voice output (`idk` ->
+  `i don't know`, etc.)
+- improve memory-grounded answers for voice without dragging Recall into v1
+- add richer voice traces / dashboard surfacing beyond current status output
+- keep tuning stitch/release timing from real call logs
 
 ## Key Changes
 
@@ -41,8 +90,8 @@ Shape:
 - `tts` adapter/client: wraps the existing HTTP TTS service contract
 - `session` layer: owns active voice sessions, rolling voice history, queueing,
   and per-session state
-- `orchestrator` layer: turns transcript -> Sandy brain -> speech-render ->
-  playback
+- `orchestrator` layer: turns transcript -> Sandy brain (with voice-specific
+  prompt framing) -> playback
 
 This keeps the spike’s useful code but stops the MVP blob from becoming
 production architecture.
@@ -53,10 +102,15 @@ Do not run a second Discord client for voice in production. Extend the existing
 Sandy Discord runtime so the main bot can also handle voice commands and own
 voice session state.
 
+Conceptually this stays one Sandy pipeline with diverging text and voice paths,
+not two unrelated bots bolted into one repo. Shared LLM, memory, registry, and
+trace infrastructure should stay shared. The divergence is in orchestration
+steps, not in the entire product identity.
+
 Implementation intent:
 
 - `bot.py` remains Discord lifecycle/event glue
-- message/text handling stays in `pipeline.py`
+- message/text handling stays in the main pipeline shape
 - voice event registration and session management plug in beside the text
   pipeline, not inside the text turn waterfall
 - voice should be supervised like other background work, not managed as naked
@@ -71,6 +125,14 @@ The main process should own:
 - shutdown of capture/playback/queues
 
 The TTS backend stays external over localhost HTTP.
+
+v1 concurrency policy:
+
+- when Sandy is in VC, text replies are paused globally
+- text messages may still be observed and queued for low-priority persistence
+  work
+- voice turns get the fast path simply by being the only foreground response
+  mode while VC is active
 
 ### 3. Introduce a voice-session context model
 
@@ -105,7 +167,7 @@ Default:
 ### 4. Persist voice turns into long-term memory, but treat Recall cautiously
 
 Store transcripts and Sandy spoken replies in long-term memory with explicit
-voice metadata, but do not assume they belong in Recall by default.
+voice metadata, but keep voice out of Recall in v1.
 
 Why:
 
@@ -114,8 +176,9 @@ Why:
 - this avoids building a separate dead-end voice-only memory system
 - it allows normal retrieval to stay useful across modalities
 - voice transcripts should definitely enter vector/RAG memory
-- voice transcripts should enter Recall only if there is explicit modality/source
-  handling and you are comfortable treating STT output as a non-literal record
+- voice transcripts should not enter Recall yet because STT is not a literal
+  source of truth and Recall is still treated as Sandy's more exact text-memory
+  layer
 
 Needed metadata:
 
@@ -124,7 +187,7 @@ Needed metadata:
 - guild id / voice channel id
 - speaker user id and display name
 - utterance timestamp
-- maybe a boolean for `is_transcript` vs `is_spoken_reply`
+- boolean for `is_transcript` vs `is_spoken_reply`
 
 Important implementation rule:
 
@@ -155,11 +218,11 @@ Implementation note:
 - do not bury auth decisions inside the voice sink or session classes; enforce
   it at command-entry level
 
-### 6. Reuse the main brain, but add a voice input wrapper and a speech-render pass
+### 6. Reuse the main brain, but give voice its own prompt instructions
 
 For v1, use the existing Sandy brain path, not a totally separate voice brain.
-But do not feed raw transcript directly to the normal text reply and call it
-done.
+But do not feed raw transcript directly to the normal text prompt and call it
+done. Voice needs its own modality-specific instructions.
 
 Flow:
 
@@ -167,10 +230,12 @@ Flow:
 2. assemble same-speaker STT fragments into one conversational turn when they
    are clearly part of the same thought
 3. build a voice-aware user turn for the brain
-4. run the normal Sandy brain generation
-5. run a speech-render step that turns the brain output into a short speakable
-   reply
-6. send the speech-rendered text to TTS
+4. if Sandy is idle, generate one short spoken reply against the current voice
+   session context
+5. if Sandy is already generating or speaking, keep appending completed human
+   turns to the session history and coalesce them into one later conversation
+   block instead of spawning overlapping replies
+6. send the final reply text to TTS
 7. append Sandy’s spoken text to the voice-session history and long-term memory
 
 Voice-aware brain input should preserve:
@@ -180,17 +245,23 @@ Voice-aware brain input should preserve:
 - relevant Recall/RAG context
 - current VC participant list
 
-Speech-render v1:
+Voice prompt / reply constraints for v1:
 
-- not a separate full model/provider abstraction yet
-- just a small post-brain render pass to shorten, de-textify, and keep replies
-  speakable
-- this matches the chosen first-pass goal: short spoken reply now, fully
-  separate voice prompt/path later
+- keep the main personality/person memory blocks shared with text mode
+- add voice-specific instructions that push for short, speakable replies
+- target mostly short spoken responses, roughly 8-30 words in the common case
+- allow occasional longer replies when the conversation genuinely calls for it,
+  but keep a hard leash on rambling
+- prefer one or two compact sentences, not text-message paragraphs
+- prefer spoken-out language over chat abbreviations and internet shorthand when
+  the line will be said aloud
+- keep a voice-specific `num_predict` cap available if needed
+- do not add a second LLM pass just to rewrite the output shorter
 
 Future path:
 
-- later replace this with a true voice-specific response prompt/path if needed
+- later add a true post-brain prosody/style pass only if the integrated loop
+  proves it is worth the latency
 
 Turn assembly / stitcher v1:
 
@@ -200,6 +271,8 @@ Turn assembly / stitcher v1:
   when they are clearly continuation pieces rather than separate turns
 - stitching should be deterministic and cheap: string concatenation plus light
   whitespace/punctuation cleanup, not an LLM
+- use the spike's preroll capture behavior; it materially improves transcript
+  quality at utterance start
 - release to the brain should be driven primarily by session state, not a dumb
   fixed wait:
   - hold if the same speaker is actively speaking
@@ -244,6 +317,8 @@ Keep/adapt:
 - WAV/transcript job model
 - TTS HTTP client + WAV->Discord PCM conversion
 - queue-based TTS playback
+- the current faster-whisper CUDA preload hack as an explicitly temporary
+  runtime workaround until startup/env handling is cleaned up
 
 Do not blindly carry over:
 
@@ -265,10 +340,10 @@ Minimum telemetry:
 - speaker id / SSRC resolution
 - STT latency and transcript text length
 - brain latency for voice turns
-- speech-render latency
 - TTS request latency
 - playback start/finish
 - queue depth / dropped items / synthesis failures
+- local voice turn/session ids for correlation in traces and the dashboard
 
 If possible, fold this into the existing trace/log vocabulary instead of
 inventing a separate logging universe.
@@ -296,15 +371,15 @@ Add internal adapter boundaries roughly like:
   voice turn before the brain sees them
 - `TextToSpeech`: synthesize text -> WAV bytes / playable audio source
 - `VoiceSessionStore`: manage active session state and rolling voice history
-- `SpeechRenderer`: brain text -> short speakable text
 - `VoiceTurnPolicy`: minimal voice gating for blank/garbage/non-actionable
   transcripts without dragging the full text bouncer into the voice path
+- `VoicePromptContext`: compose the shared Sandy personality blocks plus
+  voice-specific instructions and current participant/session context
 
 ### Memory / Recall representation
 
 Voice turns should definitely enter vector memory with voice metadata. Recall
-should be treated more cautiously in v1; it may remain text-centric at first, or
-store voice only with explicit modality/source handling.
+stays text-centric in v1.
 
 ## Expected Difficulties / Places Where Input Matters
 
@@ -317,9 +392,8 @@ These are the big ones that can turn into user thrash if left vague:
 - whether voice transcripts should be visible in the same observability UI as
   text turns
 - how aggressively to persist voice transcripts if STT quality is imperfect
-- whether Sandy should respond to every utterance, or only when directly
-  addressed / after turn-detection rules
-- whether voice transcripts should enter Recall in v1 or only vector memory
+- whether admin control is purely registry-driven or also checks Discord-native
+  permissions as a fallback
 
 ### Technical risks
 
@@ -328,8 +402,8 @@ These are the big ones that can turn into user thrash if left vague:
 - Discord voice transport remains the shakiest external dependency surface
 - voice memory will pollute long-term retrieval if transcript quality is bad and
   there’s no metadata-aware filtering
-- long spoken replies will still feel sluggish unless the speech-render pass is
-  kept tight
+- long spoken replies will still feel sluggish unless the voice prompt is kept
+  on a very short leash
 - VAD / Discord speaking events can split one human thought into multiple
   transport utterances, so turn assembly has to reconstruct conversational
   turns without introducing too much latency
@@ -338,12 +412,17 @@ These are the big ones that can turn into user thrash if left vague:
   voice” with “someone typed this in chat”
 - SSRC must not be treated as a forever-stable user identifier; it can change
   and should be resolved dynamically within the session
+- coalescing multiple completed human turns while Sandy is busy must not turn
+  into an infinite backlog or response storm
 
 ### Human footguns
 
 The likely dumb-human failure modes:
 
-- trying to skip the speech-render pass and speaking raw brain paragraphs
+- letting the voice prompt drift until the brain starts speaking in full text
+  paragraphs again
+- trying to preserve text replies while Sandy is in VC and then acting surprised
+  when voice latency feels broken
 - stuffing all voice logic directly into `pipeline.py`
 - importing faster TTS directly into main Sandy because “it works on my box”
 - treating voice history and text `Last10` as the same thing too early
@@ -361,10 +440,15 @@ The likely dumb-human failure modes:
 - Sandy can capture a human utterance, transcribe it, reply, and speak back
 - split same-speaker utterances are stitched into one turn before reply
 - separate voice-session history updates correctly across multiple turns
+- while Sandy is generating or speaking, newly completed human turns are
+  coalesced into the next response context instead of triggering overlapping
+  replies
 - Sandy spoken replies are persisted as voice-originated text memories
 - transcripts are persisted with speaker identity metadata
 - reconnect/disconnect clears or resets voice session state cleanly
 - Sandy auto-leaves after being alone for the configured idle interval
+- text replies are paused while VC is active, but text messages can still be
+  queued for background memory persistence
 
 ### Failure-path
 
@@ -377,6 +461,8 @@ The likely dumb-human failure modes:
 - blank or garbage transcripts are ignored without producing a reply
 - if Discord/VAD splits one thought into multiple fragments, Sandy does not
   reply to the incomplete fragment prematurely
+- if TTS fails for one turn, Sandy logs it, skips that spoken reply, and keeps
+  the session alive
 
 ### Behavioral
 
@@ -386,15 +472,16 @@ The likely dumb-human failure modes:
 - repeated voice turns from different speakers preserve attribution cleanly
 - current VC participant context is available to the brain and can affect reply
   content naturally
+- Sandy does not reply in text chat while voice mode is active
 
 ## Assumptions / Defaults
 
 - v1 voice control is admin-only
 - v1 voice memory goes into vector/RAG with voice metadata
-- v1 Recall handling for voice remains conservative and may stay text-only at
-  first
+- v1 Recall handling for voice stays off
 - v1 uses a separate rolling voice-session context, not text `Last10`
-- v1 uses the current main Sandy brain plus a post-brain speech-render pass
+- v1 uses the current main Sandy brain with voice-specific prompt instructions
+- v1 has no voice bouncer and no voice tool calls
 - v1 remains non-streaming end-to-end
 - v1 keeps the faster TTS backend as a separate HTTP service
 - v1 assembles split STT fragments into completed speaker turns using simple
@@ -402,12 +489,16 @@ The likely dumb-human failure modes:
 - v1 allows only one active VC globally
 - v1 requires explicit `!leave` before moving to a different VC
 - v1 auto-leaves if left alone in VC for too long
+- v1 pauses foreground text replies while VC is active
+- v1 coalesces completed human turns while Sandy is busy instead of attempting
+  overlapping replies
 
 Future work, not v1:
 
 - streaming TTS/playback
 - barge-in/interruption
-- fully separate voice response prompt/path
+- fully separate voice response prompt/path beyond the v1 modality-specific
+  instructions
 - richer prosody/style state
 - slash-command/control-panel voice UX
 
@@ -415,7 +506,7 @@ Future work, not v1:
 
 - do not merge voice into raw `pipeline.py`
 - do not inline TTS dependencies into Prime
-- do not skip speech rendering
+- do not preserve normal text replies while Sandy is in VC
 - do not collapse voice history into text `Last10` on day one
 - do not assume SSRC is stable forever
 
@@ -482,3 +573,181 @@ For the most part, the plan above is good.  These are just things that have been
  - We should account for weirdness with the speaker's mic.  I.e. if they are in the middle of a phrase and they pause to think, the discord audio compression / detection thing might stop transmitting, which is fine and normal, but the Sandy's STT will see two different utterances.
 Proposal: we keep track of them.  Even if an incoming utterance is split into multiple audio segments, we still send them to the STT as soon as possible (latency), but we keep track of who said it and when the start/stop of it was.  After they come back from STT, if it's a.) by the same author and b.) continuing from something said, say, <1s before (i.e. the gap between utterances as measured by discord/opus/SSRC start/stop events), then we just stitch the text together before dropping it into the next segment of the pipeline. 
 I guess this is an additional pipeline step - something like "stitcher" or whatever - but I mean, if someone was like "I went to the grocery store" and pauses in the middle, Sandy would otherwise get "I went to".  And then as a separate message "The grocery store".  That's not two different things she should respond to independently, that's the same thought.
+
+
+
+# A second agent's assement of the plan
+
+Voice Integration Plan — Assessment
+What the plan gets right
+The structural choices are solid. Separate sandy.voice package, not copying voicemvp wholesale, single-process architecture extending the existing bot, separate voice history from Last10, conservative Recall approach, TTS service boundary preserved, turn assembly before brain, admin-only via registry, auto-leave on idle, single VC globally. The "do not do" list at the bottom is well-calibrated to the actual codebase hazards. The human's annotations are practical and grounded.
+
+What's missing or underdeveloped
+1. The ollama lock is the elephant in the room
+This is the biggest gap. OllamaInterface serializes all model calls (brain, bouncer, tagger, summarizer, vision, embedder) through a single asyncio.Lock. The plan discusses VRAM but never directly addresses what this means for voice latency.
+
+If Sandy is in VC and text chat is active, a voice turn will queue behind whatever the text pipeline is doing (bouncer → brain → tagger → summarizer → two embed calls = up to 6 sequential model invocations before the voice brain call even starts).
+
+Concrete things the plan should address:
+
+Should voice brain calls get priority on the lock? (probably yes, but needs a mechanism — a priority queue, separate lock, or simply "skip text pipeline steps while in VC")
+If the bouncer is eliminated for voice (the human's instinct is right), that removes one lock acquisition per turn, but tagger/summarizer/embed still compete
+Should memory processing (tagger + summarizer + embed) for voice turns be deferred more aggressively — e.g., batched after the session ends?
+2. Concurrent text + voice interaction model is unspecified
+The plan doesn't address what happens when Sandy is simultaneously in VC and receiving text messages in the same server (or a different one). Options:
+
+Text pipeline continues normally, voice competes for the lock (worst latency)
+Text pipeline is throttled or paused while in VC (weird for text users)
+Voice gets a fast path that bypasses or preempts certain lock-holders
+This is an architectural decision that materially affects user experience. It should be explicit in the plan even if the v1 answer is "voice and text compete fairly on the lock, and we accept the latency."
+
+3. The speech-render pass needs a concrete design, even if rough
+The plan and human both acknowledge this is vague. But since voice latency is the critical metric, whether this is an LLM call or a rule-based pass is an architectural question, not a detail:
+
+If LLM: adds another lock acquisition + inference round. On a 24B model, that's 1–3 seconds minimum. Total voice turn round-trip becomes STT + brain + render + TTS = potentially 8–15 seconds.
+If rule-based: truncation, sentence splitting, markdown stripping, number-to-word conversion. Fast, deterministic, no lock. Probably good enough for v1.
+Recommended for v1: Don't have a separate pass at all. Inject voice-specific framing into the brain's system prompt that constrains output length and style directly. One brain call instead of brain + render = significantly better latency. BRAIN_NUM_PREDICT is already configurable — a voice-specific VOICE_NUM_PREDICT=80 or similar enforces brevity at the generation level without an extra round-trip.
+4. Voice turn-taking policy needs a concrete v1 default
+The plan lists "whether Sandy should respond to every utterance" as an open product question. For implementation, this needs a stated default. Based on the human's notes about eliminating the bouncer for voice, the recommended v1 default:
+
+Sandy responds to every non-trivial transcript when she's in VC. No bouncer.
+Cheap rule-based gating only: skip blank/garbage transcripts, ignore transcripts under N characters, skip if she's currently generating.
+This is faster (no bouncer lock acquisition), simpler, and matches the "she's the center of attention" mental model.
+5. STT/Whisper model lifecycle and VRAM budget
+The plan says "we have 48GB" and lists VRAM usage, but doesn't specify when Whisper loads into VRAM. The spike loads it at startup. Options for production:
+
+Load on !join, unload on !leave — saves ~500MB–1GB idle, adds cold-start latency
+Keep loaded always — wastes VRAM when not in VC
+The TTS model (4–6GB) is already external via HTTP, so that's fine. But Whisper lives in-process and the plan should have an explicit position.
+
+6. Preroll buffer not mentioned
+The spike's 250ms preroll buffer — capturing audio before Discord's speaking-start event fires — is a proven mechanism that materially improves transcript quality at the attack of an utterance. It should be explicitly listed in the "carry forward" pieces; it's easy to overlook and easy to accidentally drop when the capture sink is rewritten.
+
+7. CUDA library preloading for faster-whisper
+The spike has a fragile but necessary ctypes.CDLL(RTLD_GLOBAL) hack to preload NVIDIA CUDA libraries so faster-whisper can find them at init time. This is environment-specific and will cause confusing failures on any fresh setup. The plan doesn't mention it. It should either be documented explicitly or replaced with a more robust approach (e.g., proper LD_LIBRARY_PATH in the systemd service file or startup wrapper).
+
+8. Shutdown ordering
+Existing shutdown is: flush memory queue → await background tasks → exit. Voice adds: disconnect from VC → flush TTS queue → stop STT worker → stop capture sink. The plan's test section says "bot shutdown while connected to VC exits cleanly" but doesn't specify ordering relative to the existing shutdown sequence.
+
+Recommended ordering: voice session teardown should happen before pipeline.shutdown(), because in-flight voice turns may enqueue memory work. Getting this wrong causes hanging tasks or silently dropped state.
+
+9. Registry admin column — schema migration needed
+The human's proposal for a voice_admin bool on user_nicknames fits cleanly. However, the registry currently has no migration system (unlike Recall, which has auto-migrations v1→v4). Adding a column requires a decision:
+
+Add a migration system to registry (overhead)
+Use ALTER TABLE ... ADD COLUMN IF NOT EXISTS on init (pragmatic, matches the registry's current simplicity)
+The plan should note this explicitly so the implementation doesn't make an ad-hoc choice.
+
+10. Voice channel participant tracking
+The plan says "voice-aware prompt context should include the current VC participant list" but doesn't specify who maintains it. Discord fires on_voice_state_update events for joins, leaves, and moves. Something needs to subscribe to those events and maintain a live roster. This is the VoiceTransport layer's job, but it's worth calling out because it isn't just "query the channel members" — it requires active event handling integrated with bot lifecycle.
+
+11. Text normalization before TTS
+The TTS handoff doc explicitly lists text normalization as the next priority after the backend was fixed. The voice plan mentions a "speech-render pass" but doesn't specifically address normalization as a distinct concern: numbers → words, abbreviations expanded, markdown artifacts stripped, contractions handled. This is distinct from the speech-render concept and should be its own step or at minimum its own function within the TTS adapter.
+
+12. discord.py[voice] and voice_recv dependency
+The spike depends on voice_recv.VoiceRecvClient and voice_recv.AudioSink for all audio capture. These come from discord.py[voice] extras. The plan doesn't mention this dependency at all. It's worth noting because:
+
+It's the shakiest external dependency in the stack
+It determines the entire audio capture API surface
+Version pinning matters; these libraries have historically had compatibility gaps
+13. TTS failure behavior during a session
+The plan's test section says "TTS service unavailable → logs clearly, doesn't wedge." But v1 behavior should be explicitly specified: does Sandy fall back to typing in a text channel? Stay silent and continue listening? The recommended default: log the failure, skip that turn's spoken reply, continue the session normally, optionally post a text reply to the associated text channel.
+
+Minor items
+Audio format contract: 48kHz / 16-bit / 2-channel PCM is hardcoded in the spike's conversion path. Should be documented as the explicit contract between the TTS service and the voice transport layer.
+Prompt factory methods: prompt.py needs new methods — at minimum voice_brain_prompt() and whatever drives the minimal non-bouncer transcript gating. These should be explicit tasklist items.
+discord_message_id in Recall: Voice turns have no Discord message ID. The Recall schema has this field as nullable, which is fine, but query paths that assume it exists (e.g., the maintenance CLI) should handle the null case.
+TTS instruct parameter: Currently hardcoded in the spike's env config. The production home for this (voice identity instructions, voice style prompt) should be specified — probably .env alongside other model config, but it should be listed explicitly.
+Summary
+The plan is solid at the architectural level. The biggest gaps are operational:
+
+The single ollama lock's impact on voice latency — must be addressed explicitly; it's the most likely cause of a voice experience that feels broken even when everything else is working.
+The speech-render pass needs at least a rough concrete shape — the recommendation is prompt injection over a separate LLM call for v1, which eliminates an entire lock acquisition and inference round.
+The concurrent text + voice interaction model needs a stated default — even if the answer is "they compete fairly on the lock."
+Everything else ranges from "should be documented" to "nice to specify." Items 1–3 will bite hard during implementation if left unaddressed.
+
+
+# Human answers to the other agent's points
+
+1.) The ollama lock
+
+Fair point.  Honestly, I think for a v1 at least, we can just say "When Sandy is in a VC, she doesn't talk in text mode".  That eliminates lock contention.
+I think it would be fine to continue to monitor text channels that she is in and shunt the messages off to be added to the RAG and to recall, via the low priority queue.  At least for v1.
+
+2.) Concurrent text + voice interaction
+
+Sandy is not some enterprise system that needs to be able to respond to 40 different voice chats and text channels simultaneously; she's a hobby project that I'm using to learn about AI.
+Again, as said above, I think it's fine for the text chat to be effectively paused while she's in a VC.
+
+3.) The speech-render pass design
+
+I actually am in support of this agents' suggestion of giving the brain voice-specific framing and skipping a post-brain "clean up" pass.  Yes, eventually I want to get into prosody and emotional lerp, but for v1, 
+i think it's fine to just have a brain prompt for voice and a brain prompt for text.
+I did this with a previous project - I had the prompt split into various text strings that I just concatenated together as needed to form the prompt.  We could probably do that - all the personality suff as 
+a "get_personality()" or whatever, and then the instructions bit as a "get_instructions(modality: voice|text)" or whatever, add those together and that becomes the system prompt.  I mean, something
+like that.
+We can re-do that later for emotional intelligence with a lerp, and for prosody, and all that, but hell, that brain model is 18b - it should be smart enough to do some basic instructions.
+Caveat: it's possible that changing the NUM_PREDICT for the brain model will cause the vram to thrash.  I don't /think/ so, but I know previously when we had the same model load with different CTX numbers configured, 
+it would treat every combo of (model+num_ctx) as a separate invocation of the model.  I don't even know that's a deal breaker - if the big brain model is invoked with one NUM_PREDICT for text and
+another NUM_PREDICT for voice, even if that causes the VRAM to thrash, we can just warm it when joining voice, and as decided in 1. and 2. above, she won't do voice and text at the same time, so even if it
+thrashes, it's probably fine.  Thrashes will be on the border of switching between text and speech mode.
+
+4.) Voice turn-taking policy 
+
+I kinda like this agent's suggestion.  Honestly, if we reduce the scope such that Sandy won't do tool calls at least in voice v1, and we commit to responding to every message that's not obvious garbage, then
+I think that it's possible to skip the bouncer in the pipeline.  I'm willing to be convinced of the need for it, and honestly, it'd be nice to have tool calls, but ... there is something to be said for the
+simplicity of the idea.  
+
+5.) STT/Whisper / VRAM budget
+
+I'm just not concerned about this.  When we're doing voice mode, whisper uses very little vram (<1GB), and the TTS was using ~6GB.  The RAG uses like 500mb, and the big brain uses something like 16-20GB.  That's
+call it 25GB min and 30GB for safety.  Even if we still load llama3 for tagging/summarizing of recall (for text chats while she's in VC), and potentially for bouncer, that's still like 38GB.  We should 
+be well under budget.
+
+6.) Preroll buffer
+
+Yes, we should keep this.  It's good.  If it's not called out explicitly, it should be. 
+
+7.) CUDA libraries and hacks
+
+I agree it's ugly, I just don't want to fix it now.  Obviously the answer is to create some sort of startup script that loads LD_LIBRARY_PATH as an env var.  We'll get there.  I kinda doubt we're going to
+ever turn this into a systemd service, but maybe.  For now, I'm fine with the hack.  I don't get what the other agent is talking about with it being environment specific - it's just spelunking in the
+site-packages, isn't it?  That should be ... i mean, not deterministic, but similar no matter where you install the deps with pip.  Maybe i'm missing something.
+
+8.) Shutdown ordering
+
+Sure.  Whatever.  Implementation detail where I think the path forward is the obvious one.  When Sandy is told to leave voice, have her physically (you know what i mean) disconnect from the voice channel, 
+wait for all in progress pipeline steps to finish, then convert back to text mode.  If there is a pending TTS to send to the VC, it can just get dropped silently or logged.  I find myself not caring 
+overly much how this is set up.
+Also if we catch a ^C while she's in a voice chat, disconnecting should be part of the cleanup - same as above.
+
+9.) Registry db + admin + schema change
+
+Yeah, we should just create the same migration system for recall.  Copy, paste, done.  NBD.
+
+10.) Voice channel participant tracking
+
+Yep.  On join, figure out who's in the channel.  Track it.  On update, update the tracked status.  Inject it into the prompt in the brain.  I just thought this was obvious, so I'm not sure why it's
+being called out.  Is the other agent afraid of telling me that we'll have to track state?  We're gonna have to track state.  We have to track state all over the whole project.  It's fine.
+
+11.) TTS smoothing
+
+Didn't we address this above?  I think for v1 we'll just add instructions to the brain model.  It is an INSTRUCT model anyway.  If we need a post-brain pass, we'll get there.   This is the kinda
+shit that makes me want to lose motivation for the project, it's an implementation detail that is just ... it's a future problem, can we just move forward, fucking please?
+
+12.) discord-ext-voice-recv
+
+Yes, it should be mentioned.  We spent a lot of time in the spike proving it out.  Especially since currently `main` in that project doesn't even work; we had to pin it in the pyproject to a specific
+git hash because there's a pending pull request from a 3rd party that fixes this 3rd party library.  Yes, it's fragile.  It's still the best option we have.
+
+13.) TTS failure
+
+No, don't fall back to typing in text.  Or maybe put an error message in text chat.  But probably not - for now we should just log an error on the console.
+
+
+Minor items:
+
+ - Audio format: whatever, don't care.
+ - prompt methods: already discussed - I think splitting the prompt into a get_instructions and get_personality is a decent idea, we can iterate on something simlar to that.
+ - discord_message_id in recall - we're skipping recall for voice comms in v1.  We'll fuck this pig when we get to it.
+ - TTS instruct parameter: are we even using this anymore, since we're doing a clone?  Whatever, i'm sure the implementation is obvious.

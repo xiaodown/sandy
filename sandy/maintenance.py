@@ -9,13 +9,13 @@ Examples:
 import argparse
 import os
 import sys
-from pathlib import Path
 from textwrap import shorten
 
 from dotenv import load_dotenv
 
 from .paths import resolve_db_dir
 from .recall import ChatDatabase
+from .registry import Registry
 from .vector_memory import VectorMemory
 
 load_dotenv()
@@ -34,6 +34,12 @@ def _build_vector_memory(*, test_mode: bool) -> VectorMemory:
     return VectorMemory()
 
 
+def _build_registry(*, test_mode: bool) -> Registry:
+    db_dir = resolve_db_dir(test_mode=test_mode)
+    os.environ["DB_DIR"] = str(db_dir)
+    return Registry()
+
+
 def _print_recall_rows(rows) -> None:
     if not rows:
         print("No Recall messages found.")
@@ -45,6 +51,19 @@ def _print_recall_rows(rows) -> None:
             f"{row.timestamp.isoformat()} {row.server_name}/#{row.channel_name} <{row.author_name}>"
         )
         print(f"  {snippet}")
+
+
+def _print_registry_lookup_rows(rows) -> None:
+    if not rows:
+        print("No registry rows found.")
+        return
+    for row in rows:
+        nickname = row["nickname"] if row["nickname"] else "-"
+        print(
+            f"user_id={row['user_id']} user_name={row['user_name']} "
+            f"server_id={row['server_id']} server_name={row['server_name']} "
+            f"nickname={nickname!r} voice_admin={row['voice_admin']}",
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,6 +87,25 @@ def build_parser() -> argparse.ArgumentParser:
     purge.add_argument("--query", required=True, help="FTS query for Recall")
     purge.add_argument("--limit", type=int, default=20)
     purge.add_argument("--yes", action="store_true", help="Actually perform deletions")
+
+    voice_admin = subparsers.add_parser(
+        "set-voice-admin",
+        help="Set or clear registry-backed voice admin for one user/server pair",
+    )
+    voice_admin.add_argument("--user-id", type=int, required=True)
+    voice_admin.add_argument("--server-id", type=int, required=True)
+    state = voice_admin.add_mutually_exclusive_group(required=True)
+    state.add_argument("--enable", action="store_true", help="Grant voice admin")
+    state.add_argument("--disable", action="store_true", help="Revoke voice admin")
+
+    lookup = subparsers.add_parser(
+        "lookup-registry",
+        help="Fuzzy lookup users/servers/nicknames in the registry DB",
+    )
+    lookup.add_argument("--user", help="Case-insensitive substring match on users.user_name")
+    lookup.add_argument("--server", help="Case-insensitive substring match on servers.server_name")
+    lookup.add_argument("--nickname", help="Case-insensitive substring match on user_nicknames.nickname")
+    lookup.add_argument("--limit", type=int, default=20)
     return parser
 
 
@@ -110,6 +148,54 @@ def main(argv: list[str] | None = None) -> int:
             if vector_memory.delete_message(str(row.discord_message_id)):
                 deleted += 1
         print(f"\nDeleted {deleted} vector document(s); skipped {skipped} Recall row(s) with no Discord message id.")
+        return 0
+
+    if args.command == "set-voice-admin":
+        registry = _build_registry(test_mode=args.test)
+        enabled = bool(args.enable and not args.disable)
+        registry.set_voice_admin(
+            user_id=args.user_id,
+            server_id=args.server_id,
+            is_admin=enabled,
+        )
+        verb = "enabled" if enabled else "disabled"
+        print(
+            f"Voice admin {verb} for user_id={args.user_id} server_id={args.server_id}.",
+        )
+        return 0
+
+    if args.command == "lookup-registry":
+        registry = _build_registry(test_mode=args.test)
+        user_query = f"%{(args.user or '').strip().lower()}%"
+        server_query = f"%{(args.server or '').strip().lower()}%"
+        nickname_query = f"%{(args.nickname or '').strip().lower()}%"
+        with registry._get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    u.user_id,
+                    u.user_name,
+                    s.server_id,
+                    s.server_name,
+                    un.nickname,
+                    un.voice_admin
+                FROM user_nicknames un
+                JOIN users u ON u.user_id = un.user_id
+                JOIN servers s ON s.server_id = un.server_id
+                WHERE (? = '%%' OR lower(u.user_name) LIKE ?)
+                  AND (? = '%%' OR lower(s.server_name) LIKE ?)
+                  AND (? = '%%' OR lower(COALESCE(un.nickname, '')) LIKE ?)
+                ORDER BY s.server_name, u.user_name
+                LIMIT ?
+                """,
+                (
+                    user_query, user_query,
+                    server_query, server_query,
+                    nickname_query, nickname_query,
+                    args.limit,
+                ),
+            ).fetchall()
+        _print_registry_lookup_rows(rows)
         return 0
 
     parser.error(f"unknown command: {args.command}")
