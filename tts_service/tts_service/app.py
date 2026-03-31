@@ -5,100 +5,144 @@ import logging
 import os
 import wave
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
+import torch
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
+from faster_qwen3_tts import FasterQwen3TTS
 from pydantic import BaseModel
 
 load_dotenv()
 
-logger = logging.getLogger("tts_service")
+logger = logging.getLogger("tts_service_fast")
 WAV_CHANNELS = 1
 WAV_SAMPLE_WIDTH = 2
 
 
 @dataclass(frozen=True, slots=True)
 class ServiceConfig:
-    model_name: str = os.getenv("TTS_SERVICE_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign")
+    model_name: str = os.getenv("TTS_SERVICE_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
     language: str = os.getenv("TTS_SERVICE_LANGUAGE", "English")
-    instruct: str = os.getenv(
-        "TTS_SERVICE_INSTRUCT",
-        (
-            "Voice Identity: warm, mid-range, female-coded, calm and slightly amused, "
-            "natural and conversational, medium speaking pace, clear diction, gentle "
-            "dry humor, not cutesy, not breathy, not theatrical."
-        ),
+    clone_ref_audio_path: str = os.getenv(
+        "TTS_SERVICE_CLONE_REF_AUDIO",
+        "/home/xiaodown/code/sandy/sandy/voicemvp/captures/candidates/"
+        "05-1042-goodnight-robst-sleep-well-dream-of-snacks-and-r.wav",
     )
-    device_map: str = os.getenv("TTS_SERVICE_DEVICE_MAP", "cuda:0")
+    clone_ref_text: str = os.getenv(
+        "TTS_SERVICE_CLONE_REF_TEXT",
+        "goodnight robst. sleep well, dream of snacks and revenge.",
+    )
+    clone_xvec_only: bool = os.getenv(
+        "TTS_SERVICE_CLONE_XVECTOR_ONLY",
+        "true",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    device: str = os.getenv("TTS_SERVICE_DEVICE", "cuda")
     dtype: str = os.getenv("TTS_SERVICE_DTYPE", "bfloat16")
     attn_implementation: str = os.getenv("TTS_SERVICE_ATTN_IMPLEMENTATION", "sdpa")
-    max_new_tokens: int = int(os.getenv("TTS_SERVICE_MAX_NEW_TOKENS", "2048"))
+    max_seq_len: int = int(os.getenv("TTS_SERVICE_MAX_SEQ_LEN", "2048"))
+    max_new_tokens: int = int(os.getenv("TTS_SERVICE_MAX_NEW_TOKENS", "512"))
+    min_new_tokens: int = int(os.getenv("TTS_SERVICE_MIN_NEW_TOKENS", "2"))
+    do_sample: bool = os.getenv("TTS_SERVICE_DO_SAMPLE", "false").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    temperature: float = float(os.getenv("TTS_SERVICE_TEMPERATURE", "0.9"))
+    top_k: int = int(os.getenv("TTS_SERVICE_TOP_K", "50"))
+    top_p: float = float(os.getenv("TTS_SERVICE_TOP_P", "1.0"))
+    repetition_penalty: float = float(os.getenv("TTS_SERVICE_REPETITION_PENALTY", "1.05"))
+    non_streaming_mode: bool = os.getenv("TTS_SERVICE_NON_STREAMING_MODE", "false").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    max_audio_seconds: float = float(os.getenv("TTS_SERVICE_MAX_AUDIO_SECONDS", "20"))
+    warmup_text: str = os.getenv("TTS_SERVICE_WARMUP_TEXT", "hello there")
 
 
 class SynthesizeRequest(BaseModel):
     text: str
-    instruct: str | None = None
     language: str | None = None
+    instruct: str | None = None
 
 
-class QwenVoiceDesignService:
+class FasterCloneService:
     def __init__(self, config: ServiceConfig) -> None:
         self.config = config
-        self._model = None
+        self._model: FasterQwen3TTS | None = None
 
-    def _load_model(self):
+    def _resolve_dtype(self) -> torch.dtype:
+        name = self.config.dtype.lower()
+        if name in {"bfloat16", "bf16"}:
+            return torch.bfloat16
+        if name in {"float16", "fp16"}:
+            return torch.float16
+        if name in {"float32", "fp32"}:
+            return torch.float32
+        raise ValueError(f"Unsupported TTS dtype: {self.config.dtype}")
+
+    def _load_model(self) -> FasterQwen3TTS:
         if self._model is not None:
             return self._model
 
-        import torch
-        from qwen_tts import Qwen3TTSModel
-
-        dtype_name = self.config.dtype.lower()
-        if dtype_name == "bfloat16":
-            dtype = torch.bfloat16
-        elif dtype_name == "float16":
-            dtype = torch.float16
-        else:
-            raise ValueError(f"Unsupported TTS dtype: {self.config.dtype}")
-
         logger.info(
-            "Loading Qwen TTS model=%s device_map=%s dtype=%s attn=%s",
+            "Loading FasterQwen3TTS model=%s device=%s dtype=%s attn=%s max_seq_len=%s",
             self.config.model_name,
-            self.config.device_map,
+            self.config.device,
             self.config.dtype,
             self.config.attn_implementation,
+            self.config.max_seq_len,
         )
-        self._model = Qwen3TTSModel.from_pretrained(
+        self._model = FasterQwen3TTS.from_pretrained(
             self.config.model_name,
-            device_map=self.config.device_map,
-            dtype=dtype,
+            device=self.config.device,
+            dtype=self._resolve_dtype(),
             attn_implementation=self.config.attn_implementation,
+            max_seq_len=self.config.max_seq_len,
         )
-        logger.info("Loaded Qwen TTS model=%s", self.config.model_name)
+        logger.info("Loaded FasterQwen3TTS model=%s", self.config.model_name)
         return self._model
 
     def warmup(self) -> None:
-        self._load_model()
+        self.synthesize_wav_bytes(self.config.warmup_text)
 
     def synthesize_wav_bytes(
         self,
         text: str,
         *,
-        instruct: str | None = None,
         language: str | None = None,
     ) -> bytes:
         model = self._load_model()
-        wavs, sample_rate = model.generate_voice_design(
+        ref_audio = Path(self.config.clone_ref_audio_path)
+        if not ref_audio.exists():
+            raise FileNotFoundError(f"Clone reference audio not found: {ref_audio}")
+        if not self.config.clone_ref_text.strip():
+            raise ValueError("TTS_SERVICE_CLONE_REF_TEXT must not be empty")
+
+        audio_list, sample_rate = model.generate_voice_clone(
             text=text,
             language=language or self.config.language,
-            instruct=instruct or self.config.instruct,
+            ref_audio=str(ref_audio),
+            ref_text=self.config.clone_ref_text,
             max_new_tokens=self.config.max_new_tokens,
+            min_new_tokens=self.config.min_new_tokens,
+            temperature=self.config.temperature,
+            top_k=self.config.top_k,
+            top_p=self.config.top_p,
+            do_sample=self.config.do_sample,
+            repetition_penalty=self.config.repetition_penalty,
+            xvec_only=self.config.clone_xvec_only,
+            non_streaming_mode=self.config.non_streaming_mode,
         )
-        if not wavs:
-            raise RuntimeError("Qwen TTS returned no audio")
-        return _waveform_to_wav_bytes(wavs[0], sample_rate)
+        if not audio_list:
+            raise RuntimeError("FasterQwen3TTS returned no audio")
+        waveform = np.asarray(audio_list[0])
+        duration = _waveform_duration_seconds(waveform, sample_rate)
+        if duration > self.config.max_audio_seconds:
+            raise RuntimeError(
+                "FasterQwen3TTS generated audio that exceeded the configured limit: "
+                f"{duration:.2f}s > {self.config.max_audio_seconds:.2f}s",
+            )
+        return _waveform_to_wav_bytes(waveform, sample_rate)
 
 
 def _waveform_to_wav_bytes(waveform, sample_rate: int) -> bytes:
@@ -125,9 +169,22 @@ def _waveform_to_wav_bytes(waveform, sample_rate: int) -> bytes:
     return buf.getvalue()
 
 
+def _waveform_duration_seconds(waveform, sample_rate: int) -> float:
+    audio = np.asarray(waveform)
+    if sample_rate <= 0:
+        raise ValueError(f"Invalid sample rate: {sample_rate}")
+    if audio.ndim == 1:
+        frame_count = audio.shape[0]
+    elif audio.ndim == 2:
+        frame_count = max(audio.shape)
+    else:
+        raise ValueError(f"Unsupported waveform dimensions: {audio.ndim}")
+    return frame_count / float(sample_rate)
+
+
 def create_app() -> FastAPI:
     app = FastAPI()
-    service = QwenVoiceDesignService(ServiceConfig())
+    service = FasterCloneService(ServiceConfig())
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -138,7 +195,7 @@ def create_app() -> FastAPI:
         try:
             service.warmup()
         except Exception as exc:
-            logger.exception("TTS warmup failed")
+            logger.exception("Fast TTS warmup failed")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {"status": "warmed"}
 
@@ -150,11 +207,10 @@ def create_app() -> FastAPI:
         try:
             wav_bytes = service.synthesize_wav_bytes(
                 text,
-                instruct=request.instruct.strip() if request.instruct else None,
                 language=request.language.strip() if request.language else None,
             )
         except Exception as exc:
-            logger.exception("TTS synthesis failed for text=%r", text)
+            logger.exception("Fast TTS synthesis failed for text=%r", text)
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return Response(content=wav_bytes, media_type="audio/wav")
 

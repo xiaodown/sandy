@@ -66,9 +66,16 @@ class VoiceMvpConfig:
     tts_service_timeout_seconds: float = 180.0
     tts_language: str = "English"
     tts_instruct: str = (
-        "Voice Identity: warm, mid-range, female-coded, calm and slightly amused, "
-        "natural and conversational, medium speaking pace, clear diction, gentle "
-        "dry humor, not cutesy, not breathy, not theatrical."
+        "Voice Identity: feminine voice, youthful without sounding childish, "
+        "light and clear tone, slightly higher than average pitch but natural, "
+        "light but natural resonance.\n\n"
+        "Personality: dry sense of humor, slightly sarcastic, wry, lightly playful, "
+        "occasionally a little menacing in a fun way.\n\n"
+        "Delivery: quick conversational delivery, crisp diction, expressive and "
+        "human-like, emotionally open but not dramatic.\n\n"
+        "Avoid: not squeaky, not chipmunk-like, not breathy, not sultry, "
+        "not flirtatious, not seductive, not maternal, not theatrical, "
+        "not sing-song, not influencer-style."
     )
     echo_stt_to_tts: bool = True
 
@@ -105,9 +112,16 @@ def build_config(*, test_mode: bool = False) -> VoiceMvpConfig:
     tts_instruct = os.getenv(
         "VOICE_MVP_TTS_INSTRUCT",
         (
-            "Voice Identity: warm, mid-range, female-coded, calm and slightly amused, "
-            "natural and conversational, medium speaking pace, clear diction, gentle "
-            "dry humor, not cutesy, not breathy, not theatrical."
+            "Voice Identity: feminine voice, youthful without sounding childish, "
+            "light and clear tone, slightly higher than average pitch but natural, "
+            "light but natural resonance.\n\n"
+            "Personality: dry sense of humor, slightly sarcastic, wry, lightly playful, "
+            "occasionally a little menacing in a fun way.\n\n"
+            "Delivery: quick conversational delivery, crisp diction, expressive and "
+            "human-like, emotionally open but not dramatic.\n\n"
+            "Avoid: not squeaky, not chipmunk-like, not breathy, not sultry, "
+            "not flirtatious, not seductive, not maternal, not theatrical, "
+            "not sing-song, not influencer-style."
         ),
     ).strip()
     echo_stt_to_tts = os.getenv("VOICE_MVP_ECHO_STT_TO_TTS", "true").strip().lower() in {
@@ -607,12 +621,48 @@ class VoiceMvpClient(discord.Client):
     def _enqueue_capture_job_from_thread(self, job: CaptureJob) -> None:
         self.loop.call_soon_threadsafe(self._stt_queue.put_nowait, job)
 
-    async def _enqueue_tts(self, guild_id: int, text: str, *, reason: str) -> None:
-        await self._tts_queue.put((guild_id, text, reason))
+    async def _enqueue_tts(
+        self,
+        guild_id: int,
+        text: str,
+        *,
+        reason: str,
+        reply_channel_id: int | None = None,
+    ) -> None:
+        await self._tts_queue.put((guild_id, text, reason, reply_channel_id))
+
+    async def _flush_tts_queue(self, guild_id: int | None = None) -> int:
+        kept: list[tuple[int, str, str, int | None]] = []
+        dropped = 0
+        while True:
+            try:
+                item = self._tts_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            queued_guild_id, text, reason, reply_channel_id = item
+            if guild_id is None or queued_guild_id == guild_id:
+                dropped += 1
+                self._tts_queue.task_done()
+                logger.info(
+                    "Dropped queued TTS item: guild_id=%s reason=%s text=%r",
+                    queued_guild_id,
+                    reason,
+                    text,
+                )
+            else:
+                kept.append(item)
+                self._tts_queue.task_done()
+
+        for item in kept:
+            await self._tts_queue.put(item)
+
+        if dropped:
+            logger.info("Flushed %s queued TTS item(s) for guild_id=%s", dropped, guild_id)
+        return dropped
 
     async def _run_tts_worker(self) -> None:
         while True:
-            guild_id, text, reason = await self._tts_queue.get()
+            guild_id, text, reason, reply_channel_id = await self._tts_queue.get()
             try:
                 guild = self.get_guild(guild_id)
                 if guild is None:
@@ -662,6 +712,11 @@ class VoiceMvpClient(discord.Client):
                 )
             except Exception:
                 logger.exception("TTS worker failed for guild_id=%s reason=%s", guild_id, reason)
+                if reply_channel_id is not None:
+                    channel = self.get_channel(reply_channel_id)
+                    if channel is not None:
+                        with contextlib.suppress(Exception):
+                            await channel.send(f"TTS failed for queued text: `{text[:120]}`")
             finally:
                 self._tts_queue.task_done()
 
@@ -696,6 +751,7 @@ class VoiceMvpClient(discord.Client):
                         job.guild_id,
                         result.text.strip(),
                         reason=f"echo-stt:{job.path.name}",
+                        reply_channel_id=None,
                     )
             except Exception:
                 logger.exception("STT failed for capture=%s", job.path)
@@ -772,6 +828,7 @@ class VoiceMvpClient(discord.Client):
                 current_channel.name if current_channel else "?",
                 target_channel.name,
             )
+            await self._flush_tts_queue(message.guild.id)
             await existing_voice_client.move_to(target_channel)
             if isinstance(existing_voice_client, voice_recv.VoiceRecvClient):
                 self._attach_receive_probe(existing_voice_client)
@@ -789,6 +846,7 @@ class VoiceMvpClient(discord.Client):
             message.guild.name,
             target_channel.name,
         )
+        await self._flush_tts_queue(message.guild.id)
         voice_client = await target_channel.connect(
             cls=voice_recv.VoiceRecvClient,
             timeout=30.0,
@@ -812,10 +870,14 @@ class VoiceMvpClient(discord.Client):
 
         channel_name = voice_client.channel.name if voice_client.channel else "unknown"
         logger.info("Disconnecting from guild=%s channel=%s", message.guild.name, channel_name)
+        dropped = await self._flush_tts_queue(message.guild.id)
         with contextlib.suppress(Exception):
             voice_client.stop_listening()
         await voice_client.disconnect(force=True)
-        await message.channel.send(f"Left `{channel_name}`.")
+        if dropped:
+            await message.channel.send(f"Left `{channel_name}` and dropped {dropped} queued TTS item(s).")
+        else:
+            await message.channel.send(f"Left `{channel_name}`.")
 
     async def _handle_playtest(self, message: discord.Message) -> None:
         voice_client = discord.utils.get(self.voice_clients, guild=message.guild)
@@ -875,52 +937,13 @@ class VoiceMvpClient(discord.Client):
         if voice_client.channel is None:
             await message.channel.send("Voice client is connected but has no active channel.")
             return
-        if voice_client.is_playing():
-            await message.channel.send("Already playing audio.")
-            return
-
-        logger.info(
-            "Starting TTS synthesis: guild=%s channel=%s text=%r service=%s",
-            message.guild.name,
-            voice_client.channel.name,
+        await self._enqueue_tts(
+            message.guild.id,
             text,
-            self.config.tts_service_url,
+            reason=f"command-say:{message.author.display_name}",
+            reply_channel_id=message.channel.id,
         )
-
-        try:
-            wav_bytes = await asyncio.to_thread(
-                self.tts.synthesize_bytes,
-                text,
-                instruct=self.config.tts_instruct,
-                language=self.config.tts_language,
-            )
-            source = wav_bytes_to_audio_source(wav_bytes)
-        except Exception:
-            logger.exception("TTS synthesis failed")
-            await message.channel.send("TTS synthesis failed.")
-            return
-
-        logger.info(
-            "Starting TTS playback: guild=%s channel=%s wav_bytes=%s",
-            message.guild.name,
-            voice_client.channel.name,
-            len(wav_bytes),
-        )
-        try:
-            voice_client.play(
-                source,
-                after=lambda error: self._on_playback_finished(
-                    message.guild.name,
-                    voice_client.channel.name if voice_client.channel else "unknown",
-                    error,
-                ),
-            )
-        except Exception:
-            logger.exception("TTS playback failed to start")
-            await message.channel.send("Failed to start TTS playback.")
-            return
-
-        await message.channel.send(f"Speaking in `{voice_client.channel.name}`.")
+        await message.channel.send(f"Queued speech for `{voice_client.channel.name}`.")
 
 
 async def run_voice_mvp(*, test_mode: bool = False) -> int:

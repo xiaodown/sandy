@@ -2,17 +2,18 @@
 where = ["."]
 
 [project]
-name = "sandy-tts-service"
+name = "sandy-tts-service-fast"
 version = "0.1.0"
-description = "Local Qwen TTS service for the Sandy voice spike"
-requires-python = ">=3.12"
+description = "Local faster-qwen3-tts service for the Sandy voice spike"
+requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.135.2",
+    "faster-qwen3-tts>=0.2.5",
+    "numpy>=2.0.0",
     "pydantic>=2.12.5",
     "python-dotenv>=1.0.0",
-    "qwen-tts>=0.1.1",
     "uvicorn>=0.40.0",
 ]
 
 [project.scripts]
-sandy-tts-service = "tts_service.__main__:main"
+sandy-tts-service-fast = "tts_service.__main__:main"

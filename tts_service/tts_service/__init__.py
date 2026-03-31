@@ -1,1 +1,1 @@
-"""Local TTS service for the Sandy voice spike."""
+"""Faster Sandy TTS service package."""
