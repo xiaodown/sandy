@@ -285,6 +285,10 @@ h1 {
   margin-top: 12px;
 }
 
+.voice-track {
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+}
+
 .stage-card {
   padding: 13px 11px;
   border-radius: 16px;
@@ -520,6 +524,31 @@ tbody tr:hover {
   line-height: 1.35;
 }
 
+.mode-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 54px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  background: rgba(22, 22, 22, 0.08);
+  color: var(--muted);
+}
+
+.mode-voice {
+  background: rgba(201, 79, 79, 0.14);
+  color: #7b1f1f;
+}
+
+.mode-text {
+  background: rgba(31, 143, 78, 0.12);
+  color: #17633b;
+}
+
 .detail-empty {
   padding: 20px;
   border: 1px dashed var(--line);
@@ -584,6 +613,11 @@ tbody tr:hover {
   gap: 14px;
   width: min(960px, calc(100% - 72px));
   margin: 0 auto;
+}
+
+.voice-detail-stack {
+  width: 100%;
+  margin-top: 14px;
 }
 
 .detail-card {
@@ -675,6 +709,10 @@ tbody tr:hover {
   .track {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
+
+  .voice-track {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 720px) {
@@ -686,6 +724,10 @@ tbody tr:hover {
   .chip-row,
   .summary-grid,
   .track {
+    grid-template-columns: 1fr;
+  }
+
+  .voice-track {
     grid-template-columns: 1fr;
   }
 

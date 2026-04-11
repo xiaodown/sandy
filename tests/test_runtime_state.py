@@ -60,17 +60,21 @@ def test_runtime_state_tracks_voice_session_snapshot() -> None:
     state.set_voice_state(
         active=True,
         status="connected",
+        stage="idle_in_channel",
         session_id="voice-123",
         guild_id=1,
         guild_name="Guild",
         channel_id=9,
         channel_name="ops war room",
         participant_names=["alice", "bob"],
+        session_started_at=42.0,
     )
 
     snapshot = state.snapshot()
 
     assert snapshot["voice"]["active"] is True
     assert snapshot["voice"]["status"] == "connected"
+    assert snapshot["voice"]["stage"] == "idle_in_channel"
     assert snapshot["voice"]["session_id"] == "voice-123"
     assert snapshot["voice"]["participant_names"] == ["alice", "bob"]
+    assert snapshot["voice"]["session_started_at"] == 42.0

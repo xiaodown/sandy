@@ -120,20 +120,20 @@ def _summarize_recent_turns(
             tc.id AS completed_id,
             tc.trace_id,
             tc.payload_json AS turn_payload_json,
-            mr.created_at AS message_created_at,
-            mr.payload_json AS message_payload_json
+            te.created_at AS first_event_created_at,
+            te.payload_json AS first_event_payload_json
         FROM trace_events AS tc
-        LEFT JOIN trace_events AS mr
-          ON mr.id = (
+        LEFT JOIN trace_events AS te
+          ON te.id = (
               SELECT id
               FROM trace_events
-              WHERE trace_id = tc.trace_id AND stage = 'message_received'
+              WHERE trace_id = tc.trace_id
               ORDER BY created_at ASC, id ASC
               LIMIT 1
           )
         WHERE tc.stage = 'turn_completed'
         ORDER BY
-            COALESCE(mr.created_at, tc.created_at) DESC,
+            COALESCE(te.created_at, tc.created_at) DESC,
             tc.created_at DESC,
             tc.id DESC
         LIMIT ?
@@ -144,17 +144,18 @@ def _summarize_recent_turns(
     for row in turn_rows:
         trace_id = row["trace_id"]
         turn_payload = json.loads(row["turn_payload_json"])
-        message_payload = json.loads(row["message_payload_json"]) if row["message_payload_json"] else {}
-        author_is_bot = bool(message_payload.get("author_is_bot"))
+        first_event_payload = json.loads(row["first_event_payload_json"]) if row["first_event_payload_json"] else {}
+        author_is_bot = bool(first_event_payload.get("author_is_bot"))
         if human_only and author_is_bot:
             continue
         forensic = forensic_records.get(trace_id, {})
         turn_input = forensic.get("turn_input", {})
         bouncer = forensic.get("bouncer_decision", {})
         tool_call = forensic.get("tool_call", {})
+        reply_output = forensic.get("reply_output", {})
         results.append(
             {
-                "created_at": row["message_created_at"] or row["completed_at"],
+                "created_at": row["first_event_created_at"] or row["completed_at"],
                 "trace_id": trace_id,
                 "author_name": turn_input.get("author_name", "?"),
                 "channel_name": turn_input.get("channel_name", "?"),
@@ -164,6 +165,8 @@ def _summarize_recent_turns(
                 "tool_name": tool_call.get("tool_name") or bouncer.get("parsed_result", {}).get("recommended_tool"),
                 "duration_ms": turn_payload.get("duration_ms"),
                 "author_is_bot": author_is_bot,
+                "modality": turn_input.get("modality") or first_event_payload.get("modality") or "text",
+                "delivery_mode": reply_output.get("delivery_mode") or "text",
             }
         )
         if len(results) >= limit:
@@ -227,22 +230,13 @@ def get_trace_detail(*, test_mode: bool, trace_id: str) -> dict[str, Any] | None
             (trace_id,),
         ).fetchone()
         turn_payload = json.loads(turn_row["payload_json"]) if turn_row else {}
-    return {
-        "trace_id": trace_id,
-        "turn_input": turn_input,
-        "timeline": trace_events,
-        "turn_completed": turn_payload,
-        "artifacts": {
-            "bouncer_decision": forensic.get("bouncer_decision", {}),
-            "bouncer_context": forensic.get("bouncer_context", {}),
-            "vision_artifacts": forensic.get("vision_artifacts", {}),
-            "tool_call": forensic.get("tool_call", {}),
-            "retrieval": forensic.get("retrieval", {}),
-            "brain_generation": forensic.get("brain_generation", {}),
-            "reply_output": forensic.get("reply_output", {}),
-            "reply_delivery": forensic.get("reply_delivery", {}),
-        },
-    }
+        return {
+            "trace_id": trace_id,
+            "turn_input": turn_input,
+            "timeline": trace_events,
+            "turn_completed": turn_payload,
+            "artifacts": forensic,
+        }
 
 
 def _print_recent(turns: list[dict[str, Any]]) -> None:
@@ -254,7 +248,7 @@ def _print_recent(turns: list[dict[str, Any]]) -> None:
         print(
             f"{turn['created_at']} | {turn['trace_id']} | "
             f"{turn['guild_name']}/#{turn['channel_name']} | {turn['author_name']} | "
-            f"replied={turn['replied']} tool={turn['tool_name'] or '-'} "
+            f"mode={turn.get('modality', 'text')} replied={turn['replied']} tool={turn['tool_name'] or '-'} "
             f"duration={turn['duration_ms']}ms"
         )
         print(f"  {content}")
@@ -311,6 +305,19 @@ def _print_show(trace_id: str, conn: sqlite3.Connection, records_by_trace: dict[
     brain = forensic.get("brain_generation", {})
     reply = forensic.get("reply_output", {})
     delivery = forensic.get("reply_delivery", {})
+    extra_artifacts = {
+        key: value
+        for key, value in forensic.items()
+        if key not in {
+            "turn_input",
+            "bouncer_decision",
+            "retrieval",
+            "tool_call",
+            "brain_generation",
+            "reply_output",
+            "reply_delivery",
+        }
+    }
 
     print(f"Trace ID: {trace_id}")
     content = "(empty)"
@@ -389,6 +396,9 @@ def _print_show(trace_id: str, conn: sqlite3.Connection, records_by_trace: dict[
         print(f"  finalized: {reply.get('finalized_reply') or '(none)'}")
     if delivery:
         print(f"  parts: {delivery.get('message_parts')}")
+    for artifact_name, payload in sorted(extra_artifacts.items()):
+        print(f"\nArtifact: {artifact_name}")
+        print(f"  {shorten(json.dumps(payload, ensure_ascii=False), width=320, placeholder='...')}")
     return 0
 
 

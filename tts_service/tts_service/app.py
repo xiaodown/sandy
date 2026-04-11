@@ -28,8 +28,7 @@ class ServiceConfig:
     language: str = os.getenv("TTS_SERVICE_LANGUAGE", "English")
     clone_ref_audio_path: str = os.getenv(
         "TTS_SERVICE_CLONE_REF_AUDIO",
-        "/home/xiaodown/code/sandy/sandy/voicemvp/captures/candidates/"
-        "05-1042-goodnight-robst-sleep-well-dream-of-snacks-and-r.wav",
+        "/home/xiaodown/code/sandy/tts_service/assets/clone_reference.wav",
     )
     clone_ref_text: str = os.getenv(
         "TTS_SERVICE_CLONE_REF_TEXT",

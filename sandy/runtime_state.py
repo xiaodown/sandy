@@ -33,12 +33,18 @@ class BouncerDecisionSnapshot:
 class VoiceSnapshot:
     active: bool
     status: str
+    stage: str | None
     session_id: str | None
     guild_id: int | None
     guild_name: str | None
     channel_id: int | None
     channel_name: str | None
     participant_names: list[str]
+    session_started_at: float | None
+    current_trace_id: str | None
+    last_transcript: str | None
+    last_reply: str | None
+    last_error: str | None
     updated_at: float
 
 
@@ -57,12 +63,18 @@ class RuntimeState:
         self._voice = VoiceSnapshot(
             active=False,
             status="idle",
+            stage=None,
             session_id=None,
             guild_id=None,
             guild_name=None,
             channel_id=None,
             channel_name=None,
             participant_names=[],
+            session_started_at=None,
+            current_trace_id=None,
+            last_transcript=None,
+            last_reply=None,
+            last_error=None,
             updated_at=time(),
         )
 
@@ -155,23 +167,85 @@ class RuntimeState:
         *,
         active: bool,
         status: str,
+        stage: str | None = None,
         session_id: str | None = None,
         guild_id: int | None = None,
         guild_name: str | None = None,
         channel_id: int | None = None,
         channel_name: str | None = None,
         participant_names: list[str] | None = None,
+        session_started_at: float | None = None,
+        current_trace_id: str | None = None,
+        last_transcript: str | None = None,
+        last_reply: str | None = None,
+        last_error: str | None = None,
     ) -> None:
         with self._lock:
+            previous = self._voice
+            if not active:
+                self._voice = VoiceSnapshot(
+                    active=False,
+                    status=status,
+                    stage=None,
+                    session_id=None,
+                    guild_id=None,
+                    guild_name=None,
+                    channel_id=None,
+                    channel_name=None,
+                    participant_names=[],
+                    session_started_at=None,
+                    current_trace_id=None,
+                    last_transcript=None,
+                    last_reply=None,
+                    last_error=None,
+                    updated_at=time(),
+                )
+                return
             self._voice = VoiceSnapshot(
                 active=active,
                 status=status,
-                session_id=session_id,
-                guild_id=guild_id,
-                guild_name=guild_name,
-                channel_id=channel_id,
-                channel_name=channel_name,
-                participant_names=list(participant_names or []),
+                stage=stage if stage is not None else previous.stage,
+                session_id=session_id if session_id is not None else previous.session_id,
+                guild_id=guild_id if guild_id is not None else previous.guild_id,
+                guild_name=guild_name if guild_name is not None else previous.guild_name,
+                channel_id=channel_id if channel_id is not None else previous.channel_id,
+                channel_name=channel_name if channel_name is not None else previous.channel_name,
+                participant_names=list(participant_names) if participant_names is not None else list(previous.participant_names),
+                session_started_at=session_started_at if session_started_at is not None else previous.session_started_at,
+                current_trace_id=current_trace_id if current_trace_id is not None else previous.current_trace_id,
+                last_transcript=last_transcript if last_transcript is not None else previous.last_transcript,
+                last_reply=last_reply if last_reply is not None else previous.last_reply,
+                last_error=last_error if last_error is not None else previous.last_error,
+                updated_at=time(),
+            )
+
+    def update_voice_stage(
+        self,
+        *,
+        stage: str,
+        status: str | None = None,
+        current_trace_id: str | None = None,
+        last_transcript: str | None = None,
+        last_reply: str | None = None,
+        last_error: str | None = None,
+    ) -> None:
+        with self._lock:
+            previous = self._voice
+            self._voice = VoiceSnapshot(
+                active=previous.active,
+                status=status if status is not None else previous.status,
+                stage=stage,
+                session_id=previous.session_id,
+                guild_id=previous.guild_id,
+                guild_name=previous.guild_name,
+                channel_id=previous.channel_id,
+                channel_name=previous.channel_name,
+                participant_names=list(previous.participant_names),
+                session_started_at=previous.session_started_at,
+                current_trace_id=current_trace_id if current_trace_id is not None else previous.current_trace_id,
+                last_transcript=last_transcript if last_transcript is not None else previous.last_transcript,
+                last_reply=last_reply if last_reply is not None else previous.last_reply,
+                last_error=last_error if last_error is not None else previous.last_error,
                 updated_at=time(),
             )
 
@@ -215,12 +289,18 @@ class RuntimeState:
                 "voice": {
                     "active": self._voice.active,
                     "status": self._voice.status,
+                    "stage": self._voice.stage,
                     "session_id": self._voice.session_id,
                     "guild_id": self._voice.guild_id,
                     "guild_name": self._voice.guild_name,
                     "channel_id": self._voice.channel_id,
                     "channel_name": self._voice.channel_name,
                     "participant_names": list(self._voice.participant_names),
+                    "session_started_at": self._voice.session_started_at,
+                    "current_trace_id": self._voice.current_trace_id,
+                    "last_transcript": self._voice.last_transcript,
+                    "last_reply": self._voice.last_reply,
+                    "last_error": self._voice.last_error,
                     "updated_at": self._voice.updated_at,
                 },
                 "active_turns": active_turns,

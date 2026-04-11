@@ -5,19 +5,19 @@ import contextlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import os
-from pathlib import Path
 import re
-from time import time
+from time import perf_counter, time
 from uuid import uuid4
 
 import discord
 
-from ..logconf import get_logger
+from ..logconf import emit_forensic_record, get_logger
 from ..paths import resolve_runtime_path
 from ..runtime_state import RuntimeState
+from ..trace import VoiceTurnTrace, event_payload, forensic_payload
 from .capture import CaptureJob, UtteranceCaptureSink
 from .history import VoiceHistory, VoiceHistoryEntry
-from .stt import FasterWhisperTranscriber
+from .stt import FasterWhisperTranscriber, TranscriptResult
 from .tts import TtsServiceClient, TtsServiceConfig, wav_bytes_to_audio_source
 
 try:
@@ -103,8 +103,25 @@ class PendingSpeakerTurn:
     text: str
     started_at: float
     ended_at: float
+    fragment_count: int = 0
+    total_audio_seconds: float = 0.0
+    total_stt_elapsed_seconds: float = 0.0
+    transcripts: list[str] = field(default_factory=list)
     release_task: asyncio.Task | None = None
     force_release_task: asyncio.Task | None = None
+
+
+@dataclass(slots=True)
+class CompletedVoiceTurn:
+    speaker_id: int
+    speaker_name: str
+    text: str
+    started_at: float
+    ended_at: float
+    fragment_count: int
+    total_audio_seconds: float
+    total_stt_elapsed_seconds: float
+    transcripts: list[str]
 
 
 @dataclass(slots=True)
@@ -126,6 +143,7 @@ class VoiceSession:
     response_task: asyncio.Task | None = None
     playback_active: bool = False
     pending_response_needed: bool = False
+    pending_response_turns: list[CompletedVoiceTurn] = field(default_factory=list)
     response_counter: int = 0
     reply_counter: int = 0
     last_activity_at: float = field(default_factory=time)
@@ -220,6 +238,61 @@ class VoiceManager:
         else:
             logger.info("Voice task completed: %s", task.get_name())
 
+    def _trace_event(
+        self,
+        trace: VoiceTurnTrace,
+        stage: str,
+        *,
+        status: str = "ok",
+        duration_ms: int | None = None,
+        **fields: object,
+    ) -> None:
+        payload = event_payload(
+            trace,
+            stage,
+            status=status,
+            duration_ms=duration_ms,
+            **fields,
+        )
+        logger.info(
+            "TRACE %s",
+            payload,
+            extra={"event_payload": payload, "log_to_console": False},
+        )
+
+    def _forensic_event(self, trace: VoiceTurnTrace, artifact: str, **fields: object) -> None:
+        emit_forensic_record(
+            logger,
+            f"FORENSIC {artifact}",
+            forensic_payload(trace, artifact, **fields),
+        )
+
+    def _build_voice_trace(
+        self,
+        session: VoiceSession,
+        *,
+        completed_turns: list[CompletedVoiceTurn],
+    ) -> VoiceTurnTrace:
+        if len({turn.speaker_id for turn in completed_turns}) == 1:
+            author_id = completed_turns[-1].speaker_id
+            author_name = completed_turns[-1].speaker_name
+        else:
+            author_id = 0
+            author_name = "multiple speakers"
+
+        return VoiceTurnTrace(
+            trace_id=f"voice:{session.session_id}:{session.response_counter}",
+            message_id=None,
+            guild_id=session.guild_id,
+            guild_name=session.guild_name,
+            channel_id=session.channel_id,
+            channel_name=session.channel_name,
+            author_id=author_id,
+            author_name=author_name,
+            started_at=perf_counter(),
+            session_id=session.session_id,
+        )
+
     async def handle_text_command(
         self,
         message: discord.Message,
@@ -293,8 +366,8 @@ class VoiceManager:
         )
         self._attach_receive_probe(voice_client)
         self._arm_idle_timer(self._session)
-        self._sync_runtime_state(status="connected")
-        asyncio.create_task(self._warm_voice_models(), name="voice-warmup")
+        self._sync_runtime_state(status="connected", stage="idle_in_channel")
+        self._create_task(self._warm_voice_models(), name="voice-warmup")
         logger.info(
             "Voice session started: guild=%s channel=%s requested_by=%s",
             message.guild.name,
@@ -347,7 +420,7 @@ class VoiceManager:
             return
 
         if member.id == getattr(bot_user, "id", None) and after.channel is None:
-            asyncio.create_task(self._disconnect_active_voice_client(), name="voice-disconnect-sync")
+            self._create_task(self._disconnect_active_voice_client(), name="voice-disconnect-sync")
             return
 
         channel = after.channel or before.channel
@@ -403,6 +476,7 @@ class VoiceManager:
         session.active_speakers.add(speaker_id)
         session.last_activity_at = time()
         self._arm_idle_timer(session)
+        self.runtime_state.update_voice_stage(stage="capturing", status="connected")
         logger.info("Voice speaker start: speaker_id=%s", speaker_id)
 
     def _speaker_stopped_on_loop(self, speaker_id: int) -> None:
@@ -410,6 +484,7 @@ class VoiceManager:
         if session is None:
             return
         session.active_speakers.discard(speaker_id)
+        self.runtime_state.update_voice_stage(stage="stitch_wait", status="connected")
         logger.info("Voice speaker stop: speaker_id=%s", speaker_id)
         self._maybe_schedule_release(session, speaker_id)
 
@@ -420,23 +495,34 @@ class VoiceManager:
                 if job is self._STOP:
                     return
                 assert isinstance(job, CaptureJob)
+                self.runtime_state.update_voice_stage(
+                    stage="transcribing",
+                    status="connected",
+                )
                 result = await self._transcriber.transcribe_file(job.path)
                 logger.info(
-                    "Voice transcript completed: speaker=%s text=%r duration=%.2fs",
+                    "Voice transcript completed: speaker=%s text=%r audio=%.2fs stt=%.2fs",
                     job.speaker_label,
                     result.text.strip(),
                     job.duration_seconds,
+                    result.elapsed_seconds,
                 )
-                await self._handle_transcript(job, result.text.strip())
+                await self._handle_transcript(job, result)
             except Exception:
+                self.runtime_state.update_voice_stage(
+                    stage="transcribing",
+                    status="error",
+                    last_error=f"STT failed for {getattr(job, 'speaker_label', '?')}",
+                )
                 logger.exception("STT failed for capture=%s", getattr(job, "path", "?"))
             finally:
                 self._stt_queue.task_done()
 
-    async def _handle_transcript(self, job: CaptureJob, text: str) -> None:
+    async def _handle_transcript(self, job: CaptureJob, result: TranscriptResult) -> None:
         session = self._session
         if session is None or session.guild_id != job.guild_id:
             return
+        text = result.text.strip()
         speaker_id = job.speaker_id
         if speaker_id is not None:
             session.pending_stt_counts[speaker_id] = max(session.pending_stt_counts.get(speaker_id, 1) - 1, 0)
@@ -461,6 +547,10 @@ class VoiceManager:
         if pending is not None and (job.started_at - pending.ended_at) <= _VOICE_STITCH_GAP_SECONDS:
             pending.text = f"{pending.text} {text}".strip()
             pending.ended_at = job.ended_at
+            pending.fragment_count += 1
+            pending.total_audio_seconds += job.duration_seconds
+            pending.total_stt_elapsed_seconds += result.elapsed_seconds
+            pending.transcripts.append(text)
             if pending.release_task is not None:
                 pending.release_task.cancel()
             if pending.force_release_task is not None:
@@ -474,6 +564,10 @@ class VoiceManager:
                 text=text,
                 started_at=job.started_at,
                 ended_at=job.ended_at,
+                fragment_count=1,
+                total_audio_seconds=job.duration_seconds,
+                total_stt_elapsed_seconds=result.elapsed_seconds,
+                transcripts=[text],
             )
             session.pending_by_speaker[speaker_id] = pending
 
@@ -553,32 +647,39 @@ class VoiceManager:
         )
         await self._emit_completed_turn(
             session,
-            speaker_id=pending.speaker_id,
-            speaker_name=pending.speaker_name,
-            text=pending.text,
+            completed_turn=CompletedVoiceTurn(
+                speaker_id=pending.speaker_id,
+                speaker_name=pending.speaker_name,
+                text=pending.text,
+                started_at=pending.started_at,
+                ended_at=pending.ended_at,
+                fragment_count=max(1, pending.fragment_count),
+                total_audio_seconds=pending.total_audio_seconds,
+                total_stt_elapsed_seconds=pending.total_stt_elapsed_seconds,
+                transcripts=list(pending.transcripts),
+            ),
         )
 
     async def _emit_completed_turn(
         self,
         session: VoiceSession,
         *,
-        speaker_id: int,
-        speaker_name: str,
-        text: str,
+        completed_turn: CompletedVoiceTurn,
     ) -> None:
         entry = VoiceHistoryEntry(
-            speaker_id=speaker_id,
-            speaker_name=speaker_name,
-            text=text,
+            speaker_id=completed_turn.speaker_id,
+            speaker_name=completed_turn.speaker_name,
+            text=completed_turn.text,
             created_at=datetime.now(UTC),
             is_bot=False,
         )
         session.history.add(entry)
+        session.pending_response_turns.append(completed_turn)
         session.pending_response_needed = True
         logger.info(
             "Voice turn appended: speaker=%s text=%r",
-            speaker_name,
-            text,
+            completed_turn.speaker_name,
+            completed_turn.text,
         )
         if session.response_task is None or session.response_task.done():
             logger.info(
@@ -594,9 +695,12 @@ class VoiceManager:
         self._create_task(
             self._store_voice_memory(
                 session,
-                message_id=f"voice-human:{session.session_id}:{session.response_counter}:{speaker_id}:{int(time() * 1000)}",
-                author_name=speaker_name,
-                text=text,
+                message_id=(
+                    f"voice-human:{session.session_id}:{session.response_counter}:"
+                    f"{completed_turn.speaker_id}:{int(time() * 1000)}"
+                ),
+                author_name=completed_turn.speaker_name,
+                text=completed_turn.text,
             ),
             name=f"voice-store-human:{session.session_id}",
         )
@@ -611,24 +715,95 @@ class VoiceManager:
             logger.warning("Voice response task exiting early: playback already active")
             return
 
-        while session.pending_response_needed:
+        while session.pending_response_needed or session.pending_response_turns:
             session.pending_response_needed = False
             if self._bot_user is None:
                 logger.warning("Voice response task exiting early: bot user not set")
                 return
+            completed_turns = list(session.pending_response_turns)
+            session.pending_response_turns.clear()
+            if not completed_turns:
+                continue
+            session.response_counter += 1
+            trace = self._build_voice_trace(session, completed_turns=completed_turns)
+            latest_user_text = completed_turns[-1].text
+            combined_text = "\n".join(
+                f"{turn.speaker_name}: {turn.text}"
+                for turn in completed_turns
+            )
+            total_audio_ms = int(sum(turn.total_audio_seconds for turn in completed_turns) * 1000)
+            total_stt_ms = int(sum(turn.total_stt_elapsed_seconds for turn in completed_turns) * 1000)
+            total_fragments = sum(turn.fragment_count for turn in completed_turns)
+            self.runtime_state.update_voice_stage(
+                stage="turn_ready",
+                status="connected",
+                current_trace_id=trace.trace_id,
+                last_transcript=combined_text,
+                last_error=None,
+            )
+            self._trace_event(
+                trace,
+                "voice_turn_received",
+                author_is_bot=False,
+                audio_duration_ms=total_audio_ms,
+                stt_duration_ms=total_stt_ms,
+                fragment_count=total_fragments,
+                speaker_count=len({turn.speaker_id for turn in completed_turns}),
+                transcript_chars=len(combined_text),
+            )
+            self._forensic_event(
+                trace,
+                "turn_input",
+                raw_content=combined_text,
+                resolved_content=combined_text,
+                completed_turns=[
+                    {
+                        "speaker_id": turn.speaker_id,
+                        "speaker_name": turn.speaker_name,
+                        "text": turn.text,
+                        "fragment_count": turn.fragment_count,
+                        "audio_duration_ms": int(turn.total_audio_seconds * 1000),
+                        "stt_duration_ms": int(turn.total_stt_elapsed_seconds * 1000),
+                        "transcripts": list(turn.transcripts),
+                    }
+                    for turn in completed_turns
+                ],
+                participant_names=list(session.participant_names),
+                source="discord_voice",
+            )
 
             history_messages = session.history.to_ollama_messages(self._bot_user.id)
-            latest_user_text = ""
-            for entry in reversed(session.history.entries()):
-                if not entry.is_bot:
-                    latest_user_text = entry.text
-                    break
+            retrieval_started = perf_counter()
+            self.runtime_state.update_voice_stage(
+                stage="retrieval",
+                status="connected",
+                current_trace_id=trace.trace_id,
+            )
             rag_context = await self.vector_memory.query(latest_user_text, server_id=session.guild_id) if latest_user_text else ""
+            self._trace_event(
+                trace,
+                "retrieval_completed",
+                duration_ms=int((perf_counter() - retrieval_started) * 1000),
+                context_chars=len(rag_context or ""),
+            )
+            self._forensic_event(
+                trace,
+                "retrieval",
+                query_text=latest_user_text,
+                rag_context=rag_context,
+                ollama_history=history_messages,
+            )
             logger.info(
                 "Voice brain start: latest_user_text=%r participant_count=%s history_messages=%s",
                 latest_user_text,
                 len(session.participant_names),
                 len(history_messages),
+            )
+            brain_started = perf_counter()
+            self.runtime_state.update_voice_stage(
+                stage="brain",
+                status="connected",
+                current_trace_id=trace.trace_id,
             )
             try:
                 brain = await self.llm.ask_brain(
@@ -640,17 +815,60 @@ class VoiceManager:
                     tool_context=None,
                     mode="voice",
                     participant_names=session.participant_names,
+                    trace=trace,
                 )
             except Exception:
+                self._trace_event(trace, "brain_completed", status="error")
+                self._trace_event(
+                    trace,
+                    "turn_completed",
+                    status="error",
+                    duration_ms=int((perf_counter() - trace.started_at) * 1000),
+                    replied=False,
+                )
+                self.runtime_state.update_voice_stage(
+                    stage="brain",
+                    status="error",
+                    current_trace_id=trace.trace_id,
+                    last_error="Voice brain call failed",
+                )
                 logger.exception("Voice brain call failed")
-                raise
+                continue
+            self._trace_event(
+                trace,
+                "brain_completed",
+                duration_ms=int((perf_counter() - brain_started) * 1000),
+                done_reason=brain.done_reason if brain is not None else None,
+                reply_chars=len((brain.content if brain is not None else "") or ""),
+            )
             logger.info(
                 "Voice brain completed: has_response=%s",
                 bool(brain and getattr(brain, "content", "").strip()),
             )
             raw_reply = (brain.content if brain is not None else "").strip()
             reply = _sanitize_voice_reply(raw_reply)
+            self._forensic_event(
+                trace,
+                "reply_output",
+                raw_reply=raw_reply,
+                finalized_reply=reply,
+                delivery_mode="voice",
+                done_reason=brain.done_reason if brain is not None else None,
+            )
             if not reply:
+                self._trace_event(
+                    trace,
+                    "turn_completed",
+                    status="empty_reply",
+                    duration_ms=int((perf_counter() - trace.started_at) * 1000),
+                    replied=False,
+                )
+                self.runtime_state.update_voice_stage(
+                    stage="brain",
+                    status="idle",
+                    current_trace_id=trace.trace_id,
+                    last_reply="",
+                )
                 logger.warning("Voice brain returned empty reply")
                 continue
             logger.info(
@@ -658,9 +876,18 @@ class VoiceManager:
                 raw_reply,
                 reply,
             )
+            self.runtime_state.update_voice_stage(
+                stage="tts",
+                status="connected",
+                current_trace_id=trace.trace_id,
+                last_reply=reply,
+                last_error=None,
+            )
 
             session.playback_active = True
+            delivered = False
             try:
+                tts_started = perf_counter()
                 try:
                     wav_bytes = await self._tts.synthesize_bytes(reply)
                 except Exception:
@@ -674,11 +901,53 @@ class VoiceManager:
                         wav_bytes = await self._tts.synthesize_bytes(reply)
                     else:
                         raise
+                self._trace_event(
+                    trace,
+                    "tts_completed",
+                    duration_ms=int((perf_counter() - tts_started) * 1000),
+                    wav_bytes=len(wav_bytes),
+                    reply_chars=len(reply),
+                )
+                self._forensic_event(
+                    trace,
+                    "voice_tts",
+                    request_text=reply,
+                    wav_bytes=len(wav_bytes),
+                )
                 source = wav_bytes_to_audio_source(wav_bytes)
                 logger.info("Voice playback start: reply=%r wav_bytes=%s", reply, len(wav_bytes))
+                playback_started = perf_counter()
+                self.runtime_state.update_voice_stage(
+                    stage="playback",
+                    status="connected",
+                    current_trace_id=trace.trace_id,
+                    last_reply=reply,
+                )
+                self._trace_event(trace, "playback_started", reply_chars=len(reply))
                 await self._play_source(session, source)
+                self._trace_event(
+                    trace,
+                    "playback_completed",
+                    duration_ms=int((perf_counter() - playback_started) * 1000),
+                    reply_chars=len(reply),
+                )
+                self._forensic_event(
+                    trace,
+                    "reply_delivery",
+                    finalized_reply=reply,
+                    delivery_mode="voice",
+                    wav_bytes=len(wav_bytes),
+                )
                 logger.info("Voice playback finished cleanly")
+                delivered = True
             except Exception:
+                self._trace_event(trace, "tts_completed", status="error")
+                self.runtime_state.update_voice_stage(
+                    stage="tts",
+                    status="error",
+                    current_trace_id=trace.trace_id,
+                    last_error="Voice synthesis or playback failed",
+                )
                 logger.exception("Voice reply synthesis/playback failed in %s/%s", session.guild_name, session.channel_name)
             finally:
                 session.playback_active = False
@@ -700,6 +969,19 @@ class VoiceManager:
                     text=reply,
                 ),
                 name=f"voice-store-bot:{session.session_id}",
+            )
+            self._trace_event(
+                trace,
+                "turn_completed",
+                status="ok" if delivered else "error",
+                duration_ms=int((perf_counter() - trace.started_at) * 1000),
+                replied=delivered,
+            )
+            self.runtime_state.update_voice_stage(
+                stage="idle_in_channel",
+                status="connected" if delivered else "error",
+                current_trace_id=trace.trace_id,
+                last_reply=reply,
             )
 
     async def _play_source(self, session: VoiceSession, source: discord.AudioSource) -> None:
@@ -799,7 +1081,7 @@ class VoiceManager:
             with contextlib.suppress(Exception):
                 await voice_client.disconnect(force=True)
 
-    def _sync_runtime_state(self, *, status: str) -> None:
+    def _sync_runtime_state(self, *, status: str, stage: str | None = None) -> None:
         session = self._session
         if session is None:
             self.runtime_state.set_voice_state(active=False, status="idle")
@@ -807,10 +1089,12 @@ class VoiceManager:
         self.runtime_state.set_voice_state(
             active=True,
             status=status,
+            stage=stage,
             session_id=session.session_id,
             guild_id=session.guild_id,
             guild_name=session.guild_name,
             channel_id=session.channel_id,
             channel_name=session.channel_name,
             participant_names=session.participant_names,
+            session_started_at=session.started_at,
         )

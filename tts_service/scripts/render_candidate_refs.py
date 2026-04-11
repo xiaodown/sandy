@@ -7,11 +7,11 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from tts_service.app import QwenVoiceDesignService, ServiceConfig
+from tts_service.app import FasterCloneService, ServiceConfig
 
 
 RECALL_DB = Path("/home/xiaodown/code/sandy/data/prod/recall.db")
-OUTPUT_DIR = Path("/home/xiaodown/code/sandy/sandy/voicemvp/captures/candidates")
+OUTPUT_DIR = Path("/home/xiaodown/code/sandy/tts_service/assets/candidate_renders")
 MANIFEST_PATH = OUTPUT_DIR / "manifest.json"
 TEXT_PATH = OUTPUT_DIR / "manifest.txt"
 
@@ -82,7 +82,7 @@ def main() -> int:
     candidates = _fetch_candidates(RECALL_DB, CURATED_IDS[: args.limit])
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    service = QwenVoiceDesignService(ServiceConfig())
+    service = FasterCloneService(ServiceConfig())
     manifest: list[dict[str, object]] = []
     failures: list[dict[str, object]] = []
 

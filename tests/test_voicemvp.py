@@ -1,8 +1,10 @@
 from types import SimpleNamespace
 
-from sandy.voicemvp.app import (
+from sandy.voice.capture import (
     _pcm_bytes_for_milliseconds,
     _slugify_capture_label,
+)
+from sandy.voice.manager import (
     resolve_target_channel,
 )
 

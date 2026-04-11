@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import io
@@ -126,7 +127,12 @@ async def test_voice_manager_denies_non_admin() -> None:
 
 
 @pytest.mark.asyncio
-async def test_voice_manager_generates_reply_from_completed_turn() -> None:
+async def test_voice_manager_generates_reply_from_completed_turn(monkeypatch) -> None:
+    import sandy.voice.manager as voice_manager_module
+
+    for method_name in ("info", "warning", "error", "exception", "debug"):
+        monkeypatch.setattr(voice_manager_module.logger, method_name, lambda *args, **kwargs: None)
+
     voice_channel = DummyVoiceChannel(
         99,
         "ops war room",
@@ -134,7 +140,7 @@ async def test_voice_manager_generates_reply_from_completed_turn() -> None:
     )
     guild = DummyGuild(1, "Guild", [voice_channel])
     llm = SimpleNamespace(
-        ask_brain=AsyncMock(return_value=SimpleNamespace(content="yeah, fair enough")),
+        ask_brain=AsyncMock(return_value=SimpleNamespace(content="yeah, fair enough", done_reason="stop")),
     )
     vector_memory = SimpleNamespace(
         query=AsyncMock(return_value=""),
@@ -168,16 +174,28 @@ async def test_voice_manager_generates_reply_from_completed_turn() -> None:
 
     await manager._emit_completed_turn(
         session,
-        speaker_id=10,
-        speaker_name="alice",
-        text="hello from voice",
+        completed_turn=SimpleNamespace(
+            speaker_id=10,
+            speaker_name="alice",
+            text="hello from voice",
+            started_at=1.0,
+            ended_at=1.5,
+            fragment_count=1,
+            total_audio_seconds=0.5,
+            total_stt_elapsed_seconds=0.2,
+            transcripts=["hello from voice"],
+        ),
     )
     await session.response_task
+    await asyncio.sleep(0)
 
     llm.ask_brain.assert_awaited_once()
     assert llm.ask_brain.await_args.kwargs["mode"] == "voice"
     manager._tts.synthesize_bytes.assert_awaited_once_with("yeah, fair enough.")
     manager._play_source.assert_awaited_once()
+    assert manager.runtime_state.snapshot()["voice"]["current_trace_id"].startswith("voice:")
+    assert manager.runtime_state.snapshot()["voice"]["last_transcript"] == "alice: hello from voice"
+    assert manager.runtime_state.snapshot()["voice"]["last_reply"] == "yeah, fair enough."
     assert [entry.text for entry in session.history.entries()] == [
         "hello from voice",
         "yeah, fair enough.",

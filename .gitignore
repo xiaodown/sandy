@@ -16,6 +16,9 @@ tests/.testdata/
 # voice spike artifacts that would just clutter up github
 sandy/voicemvp/captures/*
 
+# Planning docs
+docs/agent-plans/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

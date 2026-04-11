@@ -8,6 +8,17 @@ const stageOrder = [
   { key: "brain", label: "Brain", desc: "Main generation" },
   { key: "reply_send", label: "Send", desc: "Reply delivery" }
 ];
+const voiceStageOrder = [
+  { key: "idle_in_channel", label: "Idle", desc: "Connected and listening" },
+  { key: "capturing", label: "Capture", desc: "Discord voice input active" },
+  { key: "stitch_wait", label: "Stitch", desc: "Waiting for more fragments" },
+  { key: "transcribing", label: "STT", desc: "Whisper transcript pass" },
+  { key: "turn_ready", label: "Ready", desc: "Completed human turn assembled" },
+  { key: "retrieval", label: "Memory", desc: "Cross-modal recall lookup" },
+  { key: "brain", label: "Brain", desc: "Voice reply generation" },
+  { key: "tts", label: "TTS", desc: "Speech synthesis" },
+  { key: "playback", label: "Playback", desc: "Speaking in VC" }
+];
 const MAX_SERVER_NAMES = 4;
 const MAX_SERVER_NAME_CHARS = 22;
 const STAGE_LINGER_MS = 1000;
@@ -18,6 +29,8 @@ const LATENCY_SEGMENTS = [
   { key: "tool", label: "Tool", color: "#e58f00" },
   { key: "retrieval", label: "Memory", color: "#2a9d8f" },
   { key: "brain", label: "Brain", color: "#6f42c1" },
+  { key: "tts", label: "TTS", color: "#c96fd6" },
+  { key: "playback", label: "Playback", color: "#c94f4f" },
   { key: "send", label: "Send", color: "#1f8f4e" },
   { key: "persist", label: "Persist", color: "#4d4d4d" }
 ];
@@ -88,6 +101,8 @@ function traceStageGroup(stage) {
   if (normalized.startsWith("tool")) return "tool";
   if (normalized.startsWith("retrieval")) return "retrieval";
   if (normalized.startsWith("brain")) return "brain";
+  if (normalized.startsWith("tts")) return "tts";
+  if (normalized.startsWith("playback")) return "playback";
   if (normalized.startsWith("reply")) return "send";
   if (normalized.startsWith("memory")) return "persist";
   return null;
@@ -104,6 +119,20 @@ function trackStageKey(stage) {
   if (normalized.startsWith("brain")) return "brain";
   if (normalized.startsWith("reply")) return "reply_send";
   return stage || null;
+}
+
+function voiceTrackStageKey(stage) {
+  const normalized = String(stage || "").toLowerCase();
+  if (normalized.startsWith("idle")) return "idle_in_channel";
+  if (normalized.startsWith("capturing")) return "capturing";
+  if (normalized.startsWith("stitch")) return "stitch_wait";
+  if (normalized.startsWith("transcribing")) return "transcribing";
+  if (normalized.startsWith("turn_ready")) return "turn_ready";
+  if (normalized.startsWith("retrieval")) return "retrieval";
+  if (normalized.startsWith("brain")) return "brain";
+  if (normalized.startsWith("tts")) return "tts";
+  if (normalized.startsWith("playback")) return "playback";
+  return null;
 }
 
 function stageDurationsFromDetail(detail) {
@@ -138,6 +167,7 @@ function renderLatencyLegend() {
 
 function renderStatus(status) {
   const discord = status.discord || {};
+  const voice = status.voice || {};
   const mode = String(status.mode || "prod").toUpperCase();
   const envBanner = el("env-banner");
   envBanner.textContent = `${mode} MODE`;
@@ -194,6 +224,7 @@ function renderStatus(status) {
   }
 
   renderTrack(current);
+  renderVoiceStatus(voice);
 }
 
 function renderTrack(current) {
@@ -216,6 +247,42 @@ function renderTrack(current) {
         <div class="stage-step">T${index + 1}</div>
         <div class="stage-name">${stage.label}</div>
         <div class="stage-meta">${stage.desc}<br>${pending ? "Waiting" : (active ? (lingering ? "Just now" : "Live now") : "Idle")}</div>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderVoiceStatus(voice) {
+  const active = Boolean(voice.active);
+  el("voice-session-note").textContent = active
+    ? `${voice.status || "connected"} · ${voice.stage || "idle_in_channel"}`
+    : "Idle";
+  el("voice-session-state").textContent = active ? "Connected" : "Offline";
+  el("voice-location").textContent = active
+    ? `${voice.guild_name || "?"} / ${voice.channel_name || "?"}`
+    : "No active voice session";
+  el("voice-trace").textContent = voice.current_trace_id || "-";
+  el("voice-started").textContent = active && voice.session_started_at
+    ? `Joined ${formatAgo(voice.session_started_at)}`
+    : "Waiting";
+  const participants = (voice.participant_names || []).join(", ");
+  el("voice-participants").textContent = participants || "Nobody else in the call";
+  el("voice-last-transcript").textContent = voice.last_transcript || "No transcript yet.";
+  el("voice-last-reply").textContent = voice.last_reply || "No spoken reply yet.";
+  el("voice-last-error").textContent = voice.last_error || "No recent voice error.";
+  renderVoiceTrack(voice);
+}
+
+function renderVoiceTrack(voice) {
+  const currentStage = voice.active ? voiceTrackStageKey(voice.stage) : null;
+  const container = el("voice-racetrack");
+  container.innerHTML = voiceStageOrder.map((stage, index) => {
+    const active = currentStage === stage.key;
+    return `
+      <div class="stage-card ${active ? "is-active" : ""}">
+        <div class="stage-step">V${index + 1}</div>
+        <div class="stage-name">${stage.label}</div>
+        <div class="stage-meta">${stage.desc}<br>${voice.active ? (active ? "Live now" : "Idle") : "Waiting"}</div>
       </div>
     `;
   }).join("");
@@ -263,12 +330,13 @@ function renderRecent(payload) {
   const tbody = el("recent-turns");
   const turns = payload.turns || [];
   if (!turns.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="detail-empty">No recent turns yet.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="detail-empty">No recent turns yet.</td></tr>`;
     return;
   }
   tbody.innerHTML = turns.map((turn) => `
     <tr data-trace-id="${turn.trace_id}">
       <td class="mono">${formatTime(turn.created_at)}</td>
+      <td><span class="mode-pill mode-${escapeHtml(turn.modality || "text")}">${escapeHtml(turn.modality || "text")}</span></td>
       <td>${escapeHtml(turn.author_name)}</td>
       <td>${escapeHtml(turn.guild_name)} / #${escapeHtml(turn.channel_name)}</td>
       <td>${turn.replied ? "yes" : "no"}</td>
@@ -380,6 +448,16 @@ function renderDetail(detail) {
   const input = detail.turn_input || {};
   const artifacts = detail.artifacts || {};
   const timeline = detail.timeline || [];
+  const artifactCards = Object.entries(artifacts)
+    .filter(([name]) => name !== "turn_input")
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, payload]) => `
+      <div class="detail-card">
+        <h3>${escapeHtml(name)}</h3>
+        <pre>${formatJson(payload)}</pre>
+      </div>
+    `)
+    .join("");
   el("detail-pane").className = "detail-stack";
   el("detail-pane").innerHTML = `
     <div class="detail-card">
@@ -400,22 +478,7 @@ function renderDetail(detail) {
         `).join("")}
       </div>
     </div>
-    <div class="detail-card">
-      <h3>Bouncer</h3>
-      <pre>${formatJson(artifacts.bouncer_decision)}</pre>
-    </div>
-    <div class="detail-card">
-      <h3>Retrieval</h3>
-      <pre>${formatJson(artifacts.retrieval)}</pre>
-    </div>
-    <div class="detail-card">
-      <h3>Tool</h3>
-      <pre>${formatJson(artifacts.tool_call)}</pre>
-    </div>
-    <div class="detail-card">
-      <h3>Reply</h3>
-      <pre>${formatJson(artifacts.reply_output)}</pre>
-    </div>
+    ${artifactCards}
   `;
 }
 
@@ -459,7 +522,7 @@ async function refreshRecent() {
     renderRecent(recent);
     await refreshLatencyChart(recent.turns || []);
   } catch (error) {
-    el("recent-turns").innerHTML = `<tr><td colspan="7" class="detail-empty">${escapeHtml(error.message)}</td></tr>`;
+    el("recent-turns").innerHTML = `<tr><td colspan="8" class="detail-empty">${escapeHtml(error.message)}</td></tr>`;
     el("latency-chart").innerHTML = `<div class="detail-empty">${escapeHtml(error.message)}</div>`;
   }
 }

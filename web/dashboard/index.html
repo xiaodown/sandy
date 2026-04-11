@@ -69,22 +69,62 @@
 
         <div class="panel">
           <div class="panel-header">
+            <div class="panel-title">Voice Session</div>
+            <div class="panel-note" id="voice-session-note">Idle</div>
+          </div>
+          <div class="summary-grid">
+            <div class="summary-box">
+              <div class="chip-label">Session</div>
+              <strong id="voice-session-state">Offline</strong>
+              <div class="chip-subtle" id="voice-location">No active voice session</div>
+            </div>
+            <div class="summary-box">
+              <div class="chip-label">Trace</div>
+              <strong class="mono" id="voice-trace">-</strong>
+              <div class="chip-subtle" id="voice-started">Waiting</div>
+            </div>
+          </div>
+          <div class="detail-stack voice-detail-stack">
+            <div class="detail-card">
+              <h3>Participants</h3>
+              <pre id="voice-participants">Nobody else in the call</pre>
+            </div>
+            <div class="detail-card">
+              <h3>Latest Transcript</h3>
+              <pre id="voice-last-transcript">No transcript yet.</pre>
+            </div>
+            <div class="detail-card">
+              <h3>Latest Spoken Reply</h3>
+              <pre id="voice-last-reply">No spoken reply yet.</pre>
+            </div>
+            <div class="detail-card">
+              <h3>Last Error</h3>
+              <pre id="voice-last-error">No recent voice error.</pre>
+            </div>
+          </div>
+          <div class="track voice-track" id="voice-racetrack"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
             <div class="panel-title">Recent Turns</div>
             <div class="panel-note">Click a row to inspect the trace</div>
           </div>
           <table>
             <colgroup>
-              <col style="width: 10%">
-              <col style="width: 12%">
+              <col style="width: 9%">
+              <col style="width: 8%">
+              <col style="width: 11%">
               <col style="width: 17%">
               <col style="width: 7%">
               <col style="width: 11%">
               <col style="width: 10%">
-              <col style="width: 33%">
+              <col style="width: 27%">
             </colgroup>
             <thead>
               <tr>
                 <th>When</th>
+                <th>Mode</th>
                 <th>Author</th>
                 <th>Channel</th>
                 <th>Reply</th>
