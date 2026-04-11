@@ -1,13 +1,17 @@
 import asyncio
+import io
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-import io
 import wave
 
 import pytest
 
 from sandy.runtime_state import RuntimeState
 from sandy.voice import VoiceManager
+from sandy.voice.capture import CaptureJob
+from sandy.voice.manager import PendingSpeakerTurn
+from sandy.voice.stt import TranscriptResult
 
 
 class DummyVoiceClient:
@@ -200,3 +204,137 @@ async def test_voice_manager_generates_reply_from_completed_turn(monkeypatch) ->
         "hello from voice",
         "yeah, fair enough.",
     ]
+
+
+@pytest.mark.asyncio
+async def test_voice_manager_handles_transcript_without_stable_speaker_id(monkeypatch) -> None:
+    import sandy.voice.manager as voice_manager_module
+
+    for method_name in ("info", "warning", "error", "exception", "debug"):
+        monkeypatch.setattr(voice_manager_module.logger, method_name, lambda *args, **kwargs: None)
+
+    voice_channel = DummyVoiceChannel(
+        99,
+        "ops war room",
+        members=[SimpleNamespace(id=10, display_name="alice")],
+    )
+    guild = DummyGuild(1, "Guild", [voice_channel])
+    llm = SimpleNamespace(
+        ask_brain=AsyncMock(return_value=SimpleNamespace(content="heard you loud and clear", done_reason="stop")),
+    )
+    vector_memory = SimpleNamespace(
+        query=AsyncMock(return_value=""),
+        add_message=AsyncMock(return_value=True),
+    )
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: True),
+        runtime_state=RuntimeState(),
+        llm=llm,
+        vector_memory=vector_memory,
+    )
+    manager._warm_voice_models = AsyncMock()
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(24_000)
+        wav_file.writeframes(b"\x00\x00" * 64)
+    manager._tts = SimpleNamespace(synthesize_bytes=AsyncMock(return_value=buf.getvalue()))
+    manager._play_source = AsyncMock()
+
+    join_message = DummyMessage(
+        guild=guild,
+        author=DummyAuthor(user_id=10, display_name="alice", voice_channel=voice_channel),
+        content="!join",
+    )
+    await manager.handle_text_command(join_message, bot_user=SimpleNamespace(id=999, display_name="Sandy"))
+
+    session = manager.active_session
+    assert session is not None
+
+    await manager._handle_transcript(
+        CaptureJob(
+            guild_id=guild.id,
+            channel_id=voice_channel.id,
+            path=Path("/tmp/unknown-speaker.wav"),
+            speaker_id=None,
+            speaker_label="mystery",
+            ssrc=1234,
+            started_at=1.0,
+            ended_at=1.4,
+            duration_seconds=0.4,
+            packet_count=12,
+            saved_at=1.5,
+        ),
+        TranscriptResult(
+            text="hello from the void",
+            language="en",
+            language_probability=0.99,
+            elapsed_seconds=0.2,
+            device="cpu",
+            compute_type="int8",
+        ),
+    )
+    await session.response_task
+    await asyncio.sleep(0)
+
+    llm.ask_brain.assert_awaited_once()
+    manager._tts.synthesize_bytes.assert_awaited_once_with("heard you loud and clear.")
+    assert manager.runtime_state.snapshot()["voice"]["last_transcript"] == "mystery: hello from the void"
+    assert [entry.text for entry in session.history.entries()] == [
+        "hello from the void",
+        "heard you loud and clear.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_voice_manager_disconnect_cancels_all_pending_release_tasks() -> None:
+    voice_channel = DummyVoiceChannel(
+        99,
+        "ops war room",
+        members=[SimpleNamespace(id=10, display_name="alice")],
+    )
+    guild = DummyGuild(1, "Guild", [voice_channel])
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: True),
+        runtime_state=RuntimeState(),
+        llm=SimpleNamespace(),
+        vector_memory=SimpleNamespace(),
+    )
+
+    join_message = DummyMessage(
+        guild=guild,
+        author=DummyAuthor(user_id=10, display_name="alice", voice_channel=voice_channel),
+        content="!join",
+    )
+    await manager.handle_text_command(join_message, bot_user=SimpleNamespace(id=999, display_name="Sandy"))
+
+    session = manager.active_session
+    assert session is not None
+
+    release_task = asyncio.create_task(asyncio.sleep(30))
+    force_release_task = asyncio.create_task(asyncio.sleep(30))
+    session.pending_by_speaker[10] = PendingSpeakerTurn(
+        speaker_id=10,
+        speaker_name="alice",
+        text="still talking",
+        started_at=1.0,
+        ended_at=2.0,
+        fragment_count=1,
+        total_audio_seconds=1.0,
+        total_stt_elapsed_seconds=0.3,
+        transcripts=["still talking"],
+        release_task=release_task,
+        force_release_task=force_release_task,
+    )
+    session.pending_stt_counts[10] = 1
+    session.active_speakers.add(10)
+
+    await manager._disconnect_active_voice_client()
+    await asyncio.sleep(0)
+
+    assert release_task.cancelled() is True
+    assert force_release_task.cancelled() is True
+    assert session.pending_by_speaker == {}
+    assert session.pending_stt_counts == {}
+    assert session.active_speakers == set()

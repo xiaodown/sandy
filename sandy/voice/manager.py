@@ -537,9 +537,17 @@ class VoiceManager:
             # No stable speaker id; treat as immediate one-off turn.
             await self._emit_completed_turn(
                 session,
-                speaker_id=0,
-                speaker_name=job.speaker_label,
-                text=text,
+                completed_turn=CompletedVoiceTurn(
+                    speaker_id=0,
+                    speaker_name=job.speaker_label,
+                    text=text,
+                    started_at=job.started_at,
+                    ended_at=job.ended_at,
+                    fragment_count=1,
+                    total_audio_seconds=job.duration_seconds,
+                    total_stt_elapsed_seconds=result.elapsed_seconds,
+                    transcripts=[text],
+                ),
             )
             return
 
@@ -1071,6 +1079,11 @@ class VoiceManager:
         for pending in session.pending_by_speaker.values():
             if pending.release_task is not None:
                 pending.release_task.cancel()
+            if pending.force_release_task is not None:
+                pending.force_release_task.cancel()
+        session.pending_by_speaker.clear()
+        session.pending_stt_counts.clear()
+        session.active_speakers.clear()
 
         voice_client = session.voice_client
         self.runtime_state.set_voice_state(active=False, status="idle")

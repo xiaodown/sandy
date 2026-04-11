@@ -336,7 +336,7 @@ function renderRecent(payload) {
   tbody.innerHTML = turns.map((turn) => `
     <tr data-trace-id="${turn.trace_id}">
       <td class="mono">${formatTime(turn.created_at)}</td>
-      <td><span class="mode-pill mode-${escapeHtml(turn.modality || "text")}">${escapeHtml(turn.modality || "text")}</span></td>
+      <td><span class="mode-pill ${modalityClass(turn.modality)}">${escapeHtml(turn.modality || "text")}</span></td>
       <td>${escapeHtml(turn.author_name)}</td>
       <td>${escapeHtml(turn.guild_name)} / #${escapeHtml(turn.channel_name)}</td>
       <td>${turn.replied ? "yes" : "no"}</td>
@@ -349,6 +349,14 @@ function renderRecent(payload) {
   tbody.querySelectorAll("tr[data-trace-id]").forEach((row) => {
     row.addEventListener("click", () => loadTrace(row.dataset.traceId));
   });
+}
+
+function modalityClass(modality) {
+  const value = String(modality || "text").toLowerCase();
+  if (value === "voice") {
+    return "mode-voice";
+  }
+  return "mode-text";
 }
 
 function renderLatencyChart(turns, detailsByTraceId) {

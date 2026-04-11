@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import os
@@ -20,6 +21,8 @@ load_dotenv()
 logger = logging.getLogger("tts_service_fast")
 WAV_CHANNELS = 1
 WAV_SAMPLE_WIDTH = 2
+SERVICE_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CLONE_REF_AUDIO = str(SERVICE_ROOT / "assets" / "clone_reference.wav")
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +31,7 @@ class ServiceConfig:
     language: str = os.getenv("TTS_SERVICE_LANGUAGE", "English")
     clone_ref_audio_path: str = os.getenv(
         "TTS_SERVICE_CLONE_REF_AUDIO",
-        "/home/xiaodown/code/sandy/tts_service/assets/clone_reference.wav",
+        DEFAULT_CLONE_REF_AUDIO,
     )
     clone_ref_text: str = os.getenv(
         "TTS_SERVICE_CLONE_REF_TEXT",
@@ -192,7 +195,7 @@ def create_app() -> FastAPI:
     @app.post("/warmup")
     async def warmup() -> dict[str, str]:
         try:
-            service.warmup()
+            await asyncio.to_thread(service.warmup)
         except Exception as exc:
             logger.exception("Fast TTS warmup failed")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -204,7 +207,8 @@ def create_app() -> FastAPI:
         if not text:
             raise HTTPException(status_code=400, detail="text must not be empty")
         try:
-            wav_bytes = service.synthesize_wav_bytes(
+            wav_bytes = await asyncio.to_thread(
+                service.synthesize_wav_bytes,
                 text,
                 language=request.language.strip() if request.language else None,
             )

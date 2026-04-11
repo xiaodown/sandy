@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -10,8 +11,9 @@ from pathlib import Path
 from tts_service.app import FasterCloneService, ServiceConfig
 
 
-RECALL_DB = Path("/home/xiaodown/code/sandy/data/prod/recall.db")
-OUTPUT_DIR = Path("/home/xiaodown/code/sandy/tts_service/assets/candidate_renders")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RECALL_DB = Path(os.getenv("SANDY_RECALL_DB", str(REPO_ROOT / "data" / "prod" / "recall.db")))
+OUTPUT_DIR = REPO_ROOT / "tts_service" / "assets" / "candidate_renders"
 MANIFEST_PATH = OUTPUT_DIR / "manifest.json"
 TEXT_PATH = OUTPUT_DIR / "manifest.txt"
 
