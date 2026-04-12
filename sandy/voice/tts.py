@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-import audioop
 import io
 import wave
 from dataclasses import dataclass
 
 import discord
 import httpx
+
+try:
+    import audioop
+except ImportError:  # pragma: no cover - only on Python 3.13+
+    import audioop_lts as audioop
 
 DISCORD_PCM_CHANNELS = 2
 DISCORD_PCM_SAMPLE_WIDTH = 2

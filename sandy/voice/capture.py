@@ -22,6 +22,14 @@ WAV_SAMPLE_WIDTH = 2
 WAV_SAMPLE_RATE = 48_000
 
 
+def _voice_recv_listener():
+    if voice_recv is None:
+        def decorator(func):
+            return func
+        return decorator
+    return voice_recv.AudioSink.listener()
+
+
 def _slugify_capture_label(value: str) -> str:
     collapsed = "-".join(value.lower().split())
     sanitized = "".join(ch for ch in collapsed if ch.isalnum() or ch == "-")
@@ -171,7 +179,7 @@ class UtteranceCaptureSink(voice_recv.AudioSink if voice_recv is not None else o
         if self._on_speaker_stopped is not None:
             self._on_speaker_stopped(active.speaker_id, active.speaker_label, reason)
 
-    @voice_recv.AudioSink.listener()  # type: ignore[union-attr]
+    @_voice_recv_listener()
     def on_voice_member_speaking_start(self, member: discord.Member) -> None:
         ssrc = self.voice_client._get_ssrc_from_id(member.id)
         if ssrc is None:
@@ -188,14 +196,14 @@ class UtteranceCaptureSink(voice_recv.AudioSink if voice_recv is not None else o
         if self._on_speaker_started is not None:
             self._on_speaker_started(member.id, member.display_name)
 
-    @voice_recv.AudioSink.listener()  # type: ignore[union-attr]
+    @_voice_recv_listener()
     def on_voice_member_speaking_stop(self, member: discord.Member) -> None:
         ssrc = self.voice_client._get_ssrc_from_id(member.id)
         if ssrc is None:
             return
         self._finalize_ssrc(ssrc, reason="speaking-stop")
 
-    @voice_recv.AudioSink.listener()  # type: ignore[union-attr]
+    @_voice_recv_listener()
     def on_voice_member_disconnect(self, member: discord.Member, ssrc: int | None) -> None:
         if ssrc is not None:
             self._finalize_ssrc(ssrc, reason="member-disconnect")

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from sandy.voice.capture import (
     _pcm_bytes_for_milliseconds,
     _slugify_capture_label,
+    _voice_recv_listener,
 )
 from sandy.voice.manager import (
     resolve_target_channel,
@@ -75,3 +76,17 @@ def test_slugify_capture_label_strips_punctuation():
 
 def test_pcm_bytes_for_milliseconds_matches_48khz_stereo_16bit():
     assert _pcm_bytes_for_milliseconds(250) == 48_000
+
+
+def test_voice_recv_listener_degrades_to_noop_when_extension_is_unavailable(monkeypatch):
+    import sandy.voice.capture as capture_module
+
+    monkeypatch.setattr(capture_module, "voice_recv", None)
+
+    marker = object()
+
+    @_voice_recv_listener()
+    def listener():
+        return marker
+
+    assert listener() is marker
