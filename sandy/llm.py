@@ -77,6 +77,7 @@ _SUMMARIZER_MODEL = os.getenv("SUMMARIZER_MODEL", "hf.co/bartowski/Llama-3.2-3B-
 #   Bump to 16384 or 32768 if you want more conversation history fed to brain.
 _BRAIN_TEMPERATURE = float(os.getenv("BRAIN_TEMPERATURE", "1.1"))
 _BRAIN_NUM_PREDICT = int(os.getenv("BRAIN_NUM_PREDICT", "512"))
+_VOICE_BRAIN_NUM_PREDICT = int(os.getenv("VOICE_BRAIN_NUM_PREDICT", "80"))
 _BRAIN_NUM_CTX     = int(os.getenv("BRAIN_NUM_CTX", "8192"))
 _BOUNCER_NUM_CTX   = int(os.getenv("BOUNCER_NUM_CTX", "8192"))
 _TAGGER_NUM_CTX    = int(os.getenv("TAGGER_NUM_CTX", "4096"))
@@ -578,6 +579,8 @@ class OllamaInterface:
         channel_name: str = "general",
         rag_context: Optional[str] = None,
         tool_context: Optional[str] = None,
+        mode: str = "text",
+        participant_names: list[str] | None = None,
         trace: TurnTrace | None = None,
     ) -> Optional[BrainResponse]:
         """Generate a response from the Brain model.
@@ -597,11 +600,21 @@ class OllamaInterface:
 
         Returns the response text plus completion metadata, or None on error.
         """
-        prompt = SandyPrompt.brain_prompt(
-            bot_name=bot_name,
-            server_name=server_name,
-            channel_name=channel_name,
-        )
+        if mode == "voice":
+            prompt = SandyPrompt.voice_brain_prompt(
+                bot_name=bot_name,
+                server_name=server_name,
+                channel_name=channel_name,
+                participant_names=participant_names,
+            )
+            num_predict = _VOICE_BRAIN_NUM_PREDICT
+        else:
+            prompt = SandyPrompt.brain_prompt(
+                bot_name=bot_name,
+                server_name=server_name,
+                channel_name=channel_name,
+            )
+            num_predict = _BRAIN_NUM_PREDICT
         # System prompt (with grounding appended) followed by conversation history.
         # The grounding line (current time + server/channel) is merged into the
         # system prompt rather than appended as a trailing user turn. Appending it
@@ -629,7 +642,7 @@ class OllamaInterface:
                     keep_alive=_KEEP_ALIVE,
                     options={
                         "temperature": _BRAIN_TEMPERATURE,
-                        "num_predict": _BRAIN_NUM_PREDICT,
+                        "num_predict": num_predict,
                         "num_ctx":     _BRAIN_NUM_CTX,
                     },
                 )
@@ -652,9 +665,11 @@ class OllamaInterface:
                         conversation_messages=messages,
                         rag_context=rag_context,
                         tool_context=tool_context,
+                        mode=mode,
+                        participant_names=participant_names,
                         options={
                             "temperature": _BRAIN_TEMPERATURE,
-                            "num_predict": _BRAIN_NUM_PREDICT,
+                            "num_predict": num_predict,
                             "num_ctx": _BRAIN_NUM_CTX,
                         },
                         raw_response=brain_response.content,

@@ -35,6 +35,7 @@ from .registry import Registry
 from .runtime_state import RuntimeState
 from .trace import TurnTrace, event_payload, forensic_payload
 from .vector_memory import VectorMemory
+from .voice import VoiceManager
 
 load_dotenv()
 
@@ -551,6 +552,7 @@ class SandyPipeline:
         memory: MemoryClient,
         memory_worker: MemoryWorker,
         runtime_state: RuntimeState,
+        voice: VoiceManager,
         tools_module=tools,
         trace_event=_trace_event,
     ) -> None:
@@ -563,6 +565,7 @@ class SandyPipeline:
         self.memory = memory
         self.memory_worker = memory_worker
         self.runtime_state = runtime_state
+        self.voice = voice
         self.tools_module = tools_module
         self.trace_event = trace_event
         self._cache_seeded = False
@@ -592,6 +595,7 @@ class SandyPipeline:
                 self.memory_worker.run(),
                 name="memory-worker",
             )
+        await self.voice.on_ready(bot)
         if not self._cache_seeded:
             seeded = await self.memory.seed_cache(self.cache)
             logger.info("Cache seeded with %d message(s) from Recall", seeded)
@@ -604,6 +608,24 @@ class SandyPipeline:
                 guild_count += 1
             ready_info += f"      * {bot.user.name} is on {guild_count} servers\n"
             logger.warning("\n\n%s", ready_info)
+
+    async def handle_control_message(self, message: discord.Message, *, bot_user) -> bool:
+        result = await self.voice.handle_text_command(message, bot_user=bot_user)
+        if not result.handled:
+            return False
+        if result.reply:
+            await message.channel.send(result.reply)
+        return True
+
+    def handle_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+        *,
+        bot_user,
+    ) -> None:
+        self.voice.handle_voice_state_update(member, before, after, bot_user=bot_user)
 
     def _log_message_received(self, message: discord.Message) -> None:
         logger.info(
@@ -870,6 +892,25 @@ class SandyPipeline:
                 )
                 return
 
+            if self.voice.text_replies_paused():
+                self.runtime_state.update_turn_stage(trace, "memory_enqueue")
+                paused_content = self._add_message_to_cache(message, [])
+                await self.memory_worker.enqueue(message)
+                self.trace_event(
+                    trace,
+                    "text_reply_paused_for_voice",
+                    voice_channel=self.voice.active_session.channel_name if self.voice.active_session else None,
+                    content_chars=len(paused_content),
+                )
+                self.trace_event(
+                    trace,
+                    "turn_completed",
+                    duration_ms=int((time.perf_counter() - turn_started) * 1000),
+                    replied=False,
+                    paused_for_voice=True,
+                )
+                return
+
             # 4. Cheap vision routing caption before bouncer
             vision_started = time.perf_counter()
             self.runtime_state.update_turn_stage(trace, "vision_router")
@@ -992,6 +1033,7 @@ class SandyPipeline:
             self.runtime_state.end_turn(trace.trace_id)
 
     async def shutdown(self) -> None:
+        await self.voice.shutdown()
         await self.memory_worker.shutdown()
 
 
@@ -1015,6 +1057,13 @@ def build_pipeline(background_tasks, *, trace_event=_trace_event, runtime_state:
         vector_memory=vector_memory,
     )
     memory_worker = MemoryWorker(memory.process_and_store, runtime_state=runtime_state)
+    voice = VoiceManager(
+        registry=registry,
+        runtime_state=runtime_state,
+        llm=llm,
+        vector_memory=vector_memory,
+        background_tasks=background_tasks,
+    )
 
     return SandyPipeline(
         background_tasks=background_tasks,
@@ -1026,6 +1075,7 @@ def build_pipeline(background_tasks, *, trace_event=_trace_event, runtime_state:
         memory=memory,
         memory_worker=memory_worker,
         runtime_state=runtime_state,
+        voice=voice,
         tools_module=tools,
         trace_event=trace_event,
     )

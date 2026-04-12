@@ -39,6 +39,7 @@ def test_runtime_state_tracks_turns_memory_and_bouncer() -> None:
     assert snapshot["discord"]["user_name"] == "Sandy"
     assert snapshot["discord"]["server_count"] == 2
     assert snapshot["discord"]["server_names"] == ["Guild One", "Guild Two"]
+    assert snapshot["voice"]["active"] is False
     assert snapshot["active_turns"][0]["trace_id"] == trace.trace_id
     assert snapshot["active_turns"][0]["stage"] == "brain"
     assert snapshot["memory_worker"]["busy"] is True
@@ -51,3 +52,29 @@ def test_runtime_state_tracks_turns_memory_and_bouncer() -> None:
 
     assert snapshot["active_turns"] == []
     assert snapshot["memory_worker"]["busy"] is False
+
+
+def test_runtime_state_tracks_voice_session_snapshot() -> None:
+    state = RuntimeState()
+
+    state.set_voice_state(
+        active=True,
+        status="connected",
+        stage="idle_in_channel",
+        session_id="voice-123",
+        guild_id=1,
+        guild_name="Guild",
+        channel_id=9,
+        channel_name="ops war room",
+        participant_names=["alice", "bob"],
+        session_started_at=42.0,
+    )
+
+    snapshot = state.snapshot()
+
+    assert snapshot["voice"]["active"] is True
+    assert snapshot["voice"]["status"] == "connected"
+    assert snapshot["voice"]["stage"] == "idle_in_channel"
+    assert snapshot["voice"]["session_id"] == "voice-123"
+    assert snapshot["voice"]["participant_names"] == ["alice", "bob"]
+    assert snapshot["voice"]["session_started_at"] == 42.0

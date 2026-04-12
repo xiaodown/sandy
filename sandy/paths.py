@@ -9,7 +9,14 @@ def project_root() -> Path:
 
 def web_root() -> Path:
     """Return the top-level web assets directory."""
-    return project_root() / "web"
+    root = project_root() / "web"
+    if root.exists():
+        return root
+
+    cwd_root = Path.cwd() / "web"
+    if cwd_root.exists():
+        return cwd_root.resolve()
+    return root
 
 
 def resolve_runtime_path(raw_path: str | os.PathLike[str]) -> Path:

@@ -1,4 +1,4 @@
-"""Lightweight turn-tracing helpers for Sandy's message pipeline."""
+"""Lightweight turn-tracing helpers for Sandy's text and voice pipelines."""
 
 from dataclasses import dataclass
 from time import perf_counter
@@ -20,6 +20,7 @@ class TurnTrace:
     author_id: int
     author_name: str
     started_at: float
+    modality: str = "text"
 
     @classmethod
     def from_message(cls, message: discord.Message) -> "TurnTrace":
@@ -36,13 +37,33 @@ class TurnTrace:
         )
 
 
+@dataclass(slots=True, frozen=True)
+class VoiceTurnTrace:
+    """Metadata that identifies one coalesced voice response cycle."""
+
+    trace_id: str
+    message_id: int | None
+    guild_id: int
+    guild_name: str
+    channel_id: int
+    channel_name: str
+    author_id: int
+    author_name: str
+    started_at: float
+    session_id: str
+    modality: str = "voice"
+
+
+TraceLike = TurnTrace | VoiceTurnTrace
+
+
 def now_ms(started_at: float) -> int:
     """Return elapsed milliseconds from a perf_counter start timestamp."""
     return int((perf_counter() - started_at) * 1000)
 
 
 def event_payload(
-    trace: TurnTrace,
+    trace: TraceLike,
     stage: str,
     *,
     status: str = "ok",
@@ -58,7 +79,11 @@ def event_payload(
         "guild_id": trace.guild_id,
         "channel_id": trace.channel_id,
         "author_id": trace.author_id,
+        "modality": getattr(trace, "modality", "text"),
     }
+    session_id = getattr(trace, "session_id", None)
+    if session_id is not None:
+        payload["session_id"] = session_id
     if duration_ms is not None:
         payload["duration_ms"] = duration_ms
     payload.update(fields)
@@ -66,7 +91,7 @@ def event_payload(
 
 
 def forensic_payload(
-    trace: TurnTrace,
+    trace: TraceLike,
     artifact: str,
     **fields: Any,
 ) -> dict[str, Any]:
@@ -81,6 +106,10 @@ def forensic_payload(
         "channel_name": trace.channel_name,
         "author_id": trace.author_id,
         "author_name": trace.author_name,
+        "modality": getattr(trace, "modality", "text"),
     }
+    session_id = getattr(trace, "session_id", None)
+    if session_id is not None:
+        payload["session_id"] = session_id
     payload.update(fields)
     return payload

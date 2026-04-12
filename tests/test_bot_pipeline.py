@@ -202,6 +202,50 @@ async def test_bot_messages_skip_bouncer_and_are_still_enqueued(bot_module, monk
 
 
 @pytest.mark.asyncio
+async def test_voice_control_message_is_handled_before_normal_pipeline(bot_module, monkeypatch):
+    message = make_message(content="!join")
+    calls: list[str] = []
+
+    async def fake_handle_control_message(_message, *, bot_user):
+        calls.append(f"control:{bot_user.display_name}")
+        return True
+
+    monkeypatch.setattr(bot_module.pipeline, "handle_control_message", fake_handle_control_message)
+    monkeypatch.setattr(bot_module.pipeline, "handle_message", AsyncMock())
+
+    await bot_module.on_message(message)
+
+    assert calls == ["control:Sandy"]
+    bot_module.pipeline.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_text_replies_pause_while_voice_session_is_active(bot_module, monkeypatch):
+    message = make_message(content="still logging this")
+    cache = FakeCache()
+    memory_worker = FakeMemoryWorker()
+    llm = SimpleNamespace(ask_bouncer=AsyncMock())
+
+    monkeypatch.setattr(bot_module.pipeline, "cache", cache)
+    monkeypatch.setattr(bot_module.pipeline, "memory_worker", memory_worker)
+    monkeypatch.setattr(bot_module.pipeline, "llm", llm)
+    monkeypatch.setattr(
+        bot_module.pipeline,
+        "voice",
+        SimpleNamespace(
+            text_replies_paused=lambda: True,
+            active_session=SimpleNamespace(channel_name="ops war room"),
+        ),
+    )
+
+    await bot_module.pipeline.handle_message(message, bot_user=SimpleNamespace(id=999, display_name="Sandy"))
+
+    assert cache.added == [message]
+    assert memory_worker.calls == [(message, None)]
+    llm.ask_bouncer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_memory_is_enqueued_before_reply_send_failure(bot_module, monkeypatch):
     message = make_message()
     steps: list[str] = []

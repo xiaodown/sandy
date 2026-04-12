@@ -99,6 +99,79 @@ def test_summarize_recent_turns_uses_trace_and_forensic_data(tmp_path: Path) -> 
             "tool_name": None,
             "duration_ms": 456,
             "author_is_bot": False,
+            "modality": "text",
+            "delivery_mode": "text",
+        }
+    ]
+
+
+def test_summarize_recent_turns_understands_voice_traces(tmp_path: Path) -> None:
+    conn = _make_trace_db(tmp_path / "trace.db")
+    conn.execute(
+        """
+        INSERT INTO trace_events (created_at, trace_id, stage, status, message_id, guild_id, channel_id, author_id, payload_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "2026-03-14T06:10:00+00:00",
+            "voice:abc:1",
+            "voice_turn_received",
+            "ok",
+            None,
+            1,
+            9,
+            3,
+            json.dumps({"trace_id": "voice:abc:1", "modality": "voice", "author_is_bot": False}),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO trace_events (created_at, trace_id, stage, status, message_id, guild_id, channel_id, author_id, payload_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "2026-03-14T06:10:04+00:00",
+            "voice:abc:1",
+            "turn_completed",
+            "ok",
+            None,
+            1,
+            9,
+            3,
+            json.dumps({"trace_id": "voice:abc:1", "replied": True, "duration_ms": 640}),
+        ),
+    )
+    forensic_records = {
+        "voice:abc:1": {
+            "turn_input": {
+                "modality": "voice",
+                "author_name": "alice",
+                "channel_name": "ops war room",
+                "guild_name": "Test Guild",
+                "resolved_content": "alice: hello from voice",
+            },
+            "reply_output": {
+                "delivery_mode": "voice",
+            },
+        }
+    }
+
+    turns = _summarize_recent_turns(conn, forensic_records, limit=5, human_only=False)
+
+    assert turns == [
+        {
+            "created_at": "2026-03-14T06:10:00+00:00",
+            "trace_id": "voice:abc:1",
+            "author_name": "alice",
+            "channel_name": "ops war room",
+            "guild_name": "Test Guild",
+            "content": "alice: hello from voice",
+            "replied": True,
+            "tool_name": None,
+            "duration_ms": 640,
+            "author_is_bot": False,
+            "modality": "voice",
+            "delivery_mode": "voice",
         }
     ]
 
