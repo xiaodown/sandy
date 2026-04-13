@@ -12,7 +12,6 @@ import os
 
 from dotenv import load_dotenv
 
-from .api import ApiServer, ApiService, api_enabled, api_host, api_port
 from .health import collect_health_report, log_startup_report
 
 # Parse args BEFORE importing .bot — bot.py reads DB_DIR and DISCORD_API_KEY
@@ -53,29 +52,35 @@ async def _main() -> int:
         startup_logger.error("Aborting startup due to %d hard failure(s)", len(report.hard_failures))
         return 1
 
+    # Build central config from env vars (already loaded by load_dotenv + arg handling).
+    from .config import SandyConfig
+    config = SandyConfig.from_env(test_mode=args.test)
+
     # Import the Discord stack only after startup prerequisites are satisfied.
-    from .bot import bot, DISCORD_API_KEY, logger, pipeline, runtime_state, shutdown_background_work  # noqa: E402
+    from .bot import bot, DISCORD_API_KEY, logger, pipeline, runtime_state, shutdown_background_work, setup  # noqa: E402
+
+    setup(config)
+
+    from .api import ApiServer, ApiService
 
     api_server: ApiServer | None = None
     try:
-        if api_enabled():
+        if config.api.enabled:
             api_server = ApiServer(
                 ApiService(pipeline=pipeline, runtime_state=runtime_state, test_mode=args.test),
-                host=api_host(),
-                port=api_port(),
+                host=config.api.host,
+                port=config.api.port,
             )
             api_server.start()
             host, port = api_server.address
             logger.info("Observability API listening on http://%s:%d", host, port)
 
-        prewarm_enabled = os.getenv("PREWARM_MODEL") == "True"
-        prewarm_model_name = os.getenv("PREWARM_MODEL_NAME")
-        if prewarm_enabled and prewarm_model_name:
-            logger.info("Beginning pre-warming of model %s before Discord connect", prewarm_model_name)
-            if await pipeline.llm.warm_model(prewarm_model_name):
-                logger.info("Pre-warming model %s complete", prewarm_model_name)
+        if config.prewarm_enabled and config.prewarm_model_name:
+            logger.info("Beginning pre-warming of model %s before Discord connect", config.prewarm_model_name)
+            if await pipeline.llm.warm_model(config.prewarm_model_name):
+                logger.info("Pre-warming model %s complete", config.prewarm_model_name)
             else:
-                logger.warning("Pre-warming of model %s failed", prewarm_model_name)
+                logger.warning("Pre-warming of model %s failed", config.prewarm_model_name)
         await bot.start(DISCORD_API_KEY)
     except Exception as exc:
         logger.error("Fatal: %s", exc)

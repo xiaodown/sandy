@@ -129,7 +129,6 @@ async def respond_to_session(manager: VoiceManager, session_id: str) -> None:
         try:
             brain = await manager.llm.ask_brain(
                 history_messages,
-                bot_name=manager._bot_user.display_name,
                 server_name=session.guild_name,
                 channel_name=session.channel_name,
                 rag_context=rag_context,

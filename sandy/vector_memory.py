@@ -26,7 +26,6 @@ be pulled in ollama before the bot starts.  Embeddings are generated via the
 async ollama Python client.
 """
 
-import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,11 +35,12 @@ import chromadb
 import ollama
 from dotenv import load_dotenv
 
+from .logconf import get_logger
 from .paths import resolve_runtime_path
 
 load_dotenv()
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _PACIFIC      = ZoneInfo("America/Los_Angeles")
 _EMBED_MODEL  = os.getenv("EMBED_MODEL", "mxbai-embed-large")
@@ -75,9 +75,15 @@ class VectorMemory:
         # → "[2026-02-20 14:32 PST] <Dave>: let's play Tarkov tonight"
     """
 
-    def __init__(self) -> None:
-        db_dir = resolve_runtime_path(os.getenv("DB_DIR", "data/prod/"))
-        chroma_path = db_dir / "chroma"
+    def __init__(
+        self,
+        *,
+        db_dir: str | None = None,
+        embed_model: str | None = None,
+        max_distance: float | None = None,
+    ) -> None:
+        _db_dir = resolve_runtime_path(db_dir or os.getenv("DB_DIR", "data/prod/"))
+        chroma_path = _db_dir / "chroma"
         chroma_path.mkdir(parents=True, exist_ok=True)
         try:
             self._chroma = chromadb.PersistentClient(path=str(chroma_path))
@@ -88,6 +94,8 @@ class VectorMemory:
             name=_COLLECTION,
             metadata={"hnsw:space": "cosine"},
         )
+        self._embed_model = embed_model or _EMBED_MODEL
+        self._max_distance = max_distance if max_distance is not None else _MAX_DISTANCE
         self._embed_client = ollama.AsyncClient()
         logger.info(
             "VectorMemory ready (path=%r, collection=%r, docs=%d)",
@@ -119,7 +127,7 @@ class VectorMemory:
         # Skip pure placeholder text stored by the Recall server for attachments.
         if content.strip() == "(no text content)":
             return False
-        resp = await self._embed_client.embed(model=_EMBED_MODEL, input=content)
+        resp = await self._embed_client.embed(model=self._embed_model, input=content)
         embedding = resp.embeddings[0]
         ts_str = timestamp.isoformat() if timestamp else ""
         self._collection.upsert(
@@ -146,8 +154,7 @@ class VectorMemory:
         self,
         text: str,
         server_id: int,
-        #n_results: int = 5,
-        n_results: int = 8,  # trying to give her a bit more context
+        n_results: int = 8,
     ) -> str:
         """Return a formatted block of semantically similar past messages.
 
@@ -167,7 +174,7 @@ class VectorMemory:
             # Cap n_results at total doc count to avoid ChromaDB errors when
             # the collection is smaller than the requested result count.
             n = min(n_results, total)
-            resp = await self._embed_client.embed(model=_EMBED_MODEL, input=text)
+            resp = await self._embed_client.embed(model=self._embed_model, input=text)
             embedding = resp.embeddings[0]
             results = self._collection.query(
                 query_embeddings=[embedding],
@@ -181,7 +188,7 @@ class VectorMemory:
 
             lines = []
             for doc, meta, dist in zip(docs, metas, distances):
-                if dist > _MAX_DISTANCE:
+                if dist > self._max_distance:
                     continue
                 author = meta.get("author_name", "?")
                 ts_raw = meta.get("timestamp", "")

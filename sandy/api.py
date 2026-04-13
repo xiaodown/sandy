@@ -1,6 +1,5 @@
 import json
 import mimetypes
-import logging
 import os
 import shutil
 import subprocess
@@ -13,10 +12,11 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from . import logs
+from .logconf import get_logger
 from .paths import resolve_db_dir, web_root
 from .registry import Registry
 
-logger = logging.getLogger("sandy.api")
+logger = get_logger("sandy.api")
 
 try:
     import pynvml
@@ -378,15 +378,3 @@ class ApiServer:
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(timeout=2)
-
-
-def api_enabled() -> bool:
-    return os.getenv("SANDY_API_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
-
-
-def api_host() -> str:
-    return os.getenv("SANDY_API_HOST", "127.0.0.1").strip() or "127.0.0.1"
-
-
-def api_port() -> int:
-    return int(os.getenv("SANDY_API_PORT", "8765"))

@@ -22,6 +22,7 @@ import httpx
 import ollama
 from dotenv import load_dotenv
 
+from .logconf import get_logger
 from .paths import resolve_db_dir
 from .recall import ChatDatabase
 from .registry import Registry
@@ -29,7 +30,7 @@ from .vector_memory import VectorMemory
 
 load_dotenv()
 
-logger = logging.getLogger("sandy.health")
+logger = get_logger("sandy.health")
 
 _INT_ENV_VARS: tuple[str, ...] = (
     "BRAIN_NUM_PREDICT",

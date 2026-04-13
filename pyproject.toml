@@ -17,7 +17,6 @@ dependencies = [
     "pillow>=11.0.0",
     "pydantic>=2.12.5",
     "python-dotenv>=1.0.0",
-    # Everything below here is for the sacrificial voice MVP spike.
     # discord 2.7.1 broke voice-recv extension and this PR fixes it but hasn't been merged yet.  Fix later after merge.
     "discord-ext-voice-recv @ git+https://github.com/rdphillips7/discord-ext-voice-recv.git@ddd28601fe556f585b869e215f29c8236b95f88f",
     "faster-whisper",

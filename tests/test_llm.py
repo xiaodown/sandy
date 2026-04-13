@@ -72,7 +72,7 @@ def test_coerce_bouncer_leaves_specific_game_lookup_alone():
     assert coerced.tool_parameters == {"query": "Vault of the Vanquished release date"}
 
 
-def test_looks_like_direct_image_ask_requires_bot_name_and_picture_language():
+def test_looks_like_direct_image_ask_requires_sandy_and_picture_language():
     context = "\n".join(
         [
             "[20s ago] [alice] random chatter",
@@ -80,8 +80,16 @@ def test_looks_like_direct_image_ask_requires_bot_name_and_picture_language():
         ]
     )
 
-    assert _looks_like_direct_image_ask(context, bot_name="Sandy") is True
-    assert _looks_like_direct_image_ask(context, bot_name="OtherBot") is False
+    assert _looks_like_direct_image_ask(context) is True
+
+    # Without 'sandy' in the message, it should not match
+    context_other = "\n".join(
+        [
+            "[20s ago] [alice] random chatter",
+            "[just now] [alice] hey bob, can you tell me what you think of this picture?",
+        ]
+    )
+    assert _looks_like_direct_image_ask(context_other) is False
 
 
 def test_coerce_bouncer_no_respond_to_true_for_direct_image_ask():
@@ -99,7 +107,7 @@ def test_coerce_bouncer_no_respond_to_true_for_direct_image_ask():
         tool_parameters=None,
     )
 
-    coerced = _coerce_bouncer_tool_selection(context, result, bot_name="Sandy")
+    coerced = _coerce_bouncer_tool_selection(context, result)
 
     assert coerced.should_respond is True
     assert "attached image or picture" in coerced.reason

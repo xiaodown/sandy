@@ -13,15 +13,16 @@ the discord API to get this info.
 
 import sqlite3
 import os
-import logging
+
 import discord
 from dotenv import load_dotenv
 
+from .logconf import get_logger
 from .paths import resolve_runtime_path
 
 load_dotenv()
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class Registry:
@@ -30,9 +31,11 @@ class Registry:
     persisted to a local SQLite database to avoid repeated API calls.
     """
 
-    def __init__(self):
-        db_dir = resolve_runtime_path(os.getenv("DB_DIR", "data/prod/"))
-        self.db_path = str(db_dir / os.getenv("SERVER_DB_NAME", "server.db"))
+    def __init__(self, db_path: str | None = None):
+        if db_path is None:
+            db_dir = resolve_runtime_path(os.getenv("DB_DIR", "data/prod/"))
+            db_path = str(db_dir / os.getenv("SERVER_DB_NAME", "server.db"))
+        self.db_path = db_path
         self._initialize_db()
 
     def _get_conn(self) -> sqlite3.Connection:

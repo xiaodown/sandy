@@ -130,6 +130,10 @@ def make_message(*, author_bot: bool = False, content: str = "hey sandy") -> Dum
 def bot_module(monkeypatch):
     import sandy.bot as bot_module
 
+    # Ensure pipeline is constructed (no config — env-var fallback path).
+    if bot_module.pipeline is None:
+        bot_module.setup()
+
     monkeypatch.setattr(bot_module.pipeline, "trace_event", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         bot_module,

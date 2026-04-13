@@ -3,7 +3,7 @@ Pydantic models for the chat history API.
 """
 
 from datetime import datetime
-from typing import List, Optional
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -27,7 +27,7 @@ class ChatMessageCreate(BaseModel):
         }
     )
 
-    discord_message_id: Optional[int] = Field(
+    discord_message_id: int | None = Field(
         default=None,
         description="Original Discord message snowflake, when known",
     )
@@ -41,8 +41,8 @@ class ChatMessageCreate(BaseModel):
     server_name: str = Field(..., min_length=1, max_length=255, description="Server name at time of message")
     content: str = Field(..., min_length=1, description="Message content (may include markdown)")
     timestamp: datetime = Field(..., description="When the message was sent (ISO 8601, required)")
-    tags: Optional[List[str]] = Field(default=None, description="Optional tags for the message (added by LLM)")
-    summary: Optional[str] = Field(default=None, max_length=1000, description="Optional message summary (added by LLM)")
+    tags: list[str] | None = Field(default=None, description="Optional tags for the message (added by LLM)")
+    summary: str | None = Field(default=None, max_length=1000, description="Optional message summary (added by LLM)")
 
 class ChatMessageResponse(BaseModel):
     """Model for chat message responses."""
@@ -67,7 +67,7 @@ class ChatMessageResponse(BaseModel):
     )
 
     id: int
-    discord_message_id: Optional[int] = None
+    discord_message_id: int | None = None
     author_id: int
     channel_id: int
     server_id: int
@@ -76,5 +76,5 @@ class ChatMessageResponse(BaseModel):
     server_name: str
     content: str
     timestamp: datetime
-    tags: Optional[List[str]] = None
-    summary: Optional[str] = None
+    tags: list[str] | None = None
+    summary: str | None = None

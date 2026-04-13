@@ -17,14 +17,14 @@ Public API
 """
 
 import asyncio
-import logging
 import os
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import discord
 from dotenv import load_dotenv
 
+from .logconf import get_logger
 from .recall import ChatDatabase, ChatMessageCreate
 
 if TYPE_CHECKING:
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 load_dotenv()
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class MemoryClient:
@@ -56,18 +56,21 @@ class MemoryClient:
     def __init__(
         self,
         db: ChatDatabase,
-        llm: "Optional[OllamaInterface]" = None,
-        vector_memory: "Optional[VectorMemory]" = None,
+        llm: "OllamaInterface | None" = None,
+        vector_memory: "VectorMemory | None" = None,
+        summarize_threshold: int | None = None,
     ):
         self._db = db
         self._llm = llm
         self._vector_memory = vector_memory
+        if summarize_threshold is not None:
+            self.SUMMARIZE_THRESHOLD = summarize_threshold
 
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
 
-    async def process_and_store(self, message: discord.Message, image_descriptions: Optional[list[str]] = None) -> None:
+    async def process_and_store(self, message: discord.Message, image_descriptions: list[str] | None = None) -> None:
         """Tag, optionally summarise, then persist one message.
 
         Intended to be run as a fire-and-forget background task after the
@@ -87,7 +90,7 @@ class MemoryClient:
         metadata (author, channel, guild, id).
         """
         tags: list[str] = []
-        summary: Optional[str] = None
+        summary: str | None = None
         content_for_storage = self._build_content_for_storage(
             message,
             image_descriptions=image_descriptions,
@@ -182,7 +185,7 @@ class MemoryClient:
         self,
         message: discord.Message,
         tags: list[str],
-        summary: Optional[str] = None,
+        summary: str | None = None,
     ) -> bool:
         """Store a Discord message in Recall with LLM-generated tags.
 
@@ -265,7 +268,7 @@ class MemoryClient:
         self,
         message: discord.Message,
         *,
-        image_descriptions: Optional[list[str]] = None,
+        image_descriptions: list[str] | None = None,
     ) -> str:
         """Build the content string used for both Recall storage and RAG."""
         content_for_storage = message.content or ""
@@ -283,9 +286,9 @@ class MemoryClient:
     def _store_recall(
         self,
         message: discord.Message,
-        tags: Optional[list[str]],
-        summary: Optional[str],
-        content_override: Optional[str] = None,
+        tags: list[str] | None,
+        summary: str | None,
+        content_override: str | None = None,
     ) -> bool:
         """Create a ChatMessageCreate and insert directly into Recall.
 

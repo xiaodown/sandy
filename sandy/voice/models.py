@@ -25,6 +25,46 @@ _VOICE_REPLY_MAX_CHARS = int(os.getenv("VOICE_REPLY_MAX_CHARS", "220"))
 _VOICE_REPLY_MAX_SENTENCES = int(os.getenv("VOICE_REPLY_MAX_SENTENCES", "2"))
 
 
+def configure_voice(
+    *,
+    capture_dir: str | None = None,
+    preroll_ms: int | None = None,
+    stitch_gap_seconds: float | None = None,
+    stitch_release_seconds: float | None = None,
+    history_maxlen: int | None = None,
+    idle_auto_leave_seconds: int | None = None,
+    force_release_seconds: float | None = None,
+    reply_max_words: int | None = None,
+    reply_max_chars: int | None = None,
+    reply_max_sentences: int | None = None,
+) -> None:
+    """Override voice constants from a VoiceConfig at startup."""
+    global _VOICE_CAPTURE_DIR, _VOICE_PREROLL_MS, _VOICE_STITCH_GAP_SECONDS
+    global _VOICE_STITCH_RELEASE_SECONDS, _VOICE_HISTORY_MAXLEN
+    global _VOICE_IDLE_AUTO_LEAVE_SECONDS, _VOICE_FORCE_RELEASE_SECONDS
+    global _VOICE_REPLY_MAX_WORDS, _VOICE_REPLY_MAX_CHARS, _VOICE_REPLY_MAX_SENTENCES
+    if capture_dir is not None:
+        _VOICE_CAPTURE_DIR = resolve_runtime_path(capture_dir)
+    if preroll_ms is not None:
+        _VOICE_PREROLL_MS = preroll_ms
+    if stitch_gap_seconds is not None:
+        _VOICE_STITCH_GAP_SECONDS = stitch_gap_seconds
+    if stitch_release_seconds is not None:
+        _VOICE_STITCH_RELEASE_SECONDS = stitch_release_seconds
+    if history_maxlen is not None:
+        _VOICE_HISTORY_MAXLEN = history_maxlen
+    if idle_auto_leave_seconds is not None:
+        _VOICE_IDLE_AUTO_LEAVE_SECONDS = idle_auto_leave_seconds
+    if force_release_seconds is not None:
+        _VOICE_FORCE_RELEASE_SECONDS = force_release_seconds
+    if reply_max_words is not None:
+        _VOICE_REPLY_MAX_WORDS = reply_max_words
+    if reply_max_chars is not None:
+        _VOICE_REPLY_MAX_CHARS = reply_max_chars
+    if reply_max_sentences is not None:
+        _VOICE_REPLY_MAX_SENTENCES = reply_max_sentences
+
+
 # ── Utility functions ──────────────────────────────────────────────────────────
 
 def _normalize_name(value: str) -> str:

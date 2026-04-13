@@ -17,7 +17,6 @@ handler, regardless of what the model provided.
 """
 
 import asyncio
-import logging
 import os
 import random
 import time
@@ -28,12 +27,13 @@ from zoneinfo import ZoneInfo
 import httpx
 from dotenv import load_dotenv
 
+from .logconf import get_logger
 from .recall import ChatDatabase
 from .registry import Registry
 
 load_dotenv()
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Recall database — initialised by init_recall_db() at bot startup.
 # tools.py doesn't own the db lifecycle; discord_handler creates it and
@@ -49,6 +49,27 @@ def init_recall_db(db: ChatDatabase) -> None:
     """
     global _recall_db
     _recall_db = db
+
+
+def init_tools_config(
+    *,
+    searxng_base_url: str | None = None,
+    steam_cache_ttl: int | None = None,
+    registry: Registry | None = None,
+) -> None:
+    """Optionally override tool-level configuration at startup.
+
+    Called from pipeline construction when a SandyConfig is available.
+    Falls back to env vars / defaults if not called.
+    """
+    global _SEARXNG_BASE, _STEAM_CACHE_TTL_SECONDS, _registry
+    if searxng_base_url is not None:
+        _SEARXNG_BASE = searxng_base_url
+    if steam_cache_ttl is not None:
+        _STEAM_CACHE_TTL_SECONDS = steam_cache_ttl
+    if registry is not None:
+        _registry = registry
+
 
 _SEARXNG_BASE = (
     f"http://{os.getenv('SEARXNG_HOST', '127.0.0.1')}"
@@ -74,8 +95,8 @@ _steam_cache_lock = asyncio.Lock()
 _PACIFIC = ZoneInfo("America/Los_Angeles")
 
 # Registry for resolving current nicknames from stored author_id + server_id.
-# Uses the same SQLite db as the bot; reads are cheap and always up-to-date.
-_registry = Registry()
+# Initialised by init_tools_config() at pipeline construction time.
+_registry: Registry | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +149,7 @@ def _format_messages(data: list) -> str:
         author_id   = msg.author_id
         server_id   = msg.server_id
         stored_name = msg.author_name or "?"
-        if author_id and server_id:
+        if author_id and server_id and _registry is not None:
             info = _registry.get_user_info(author_id, server_id)
             if info:
                 author = info.get("nickname") or info.get("user_name") or stored_name

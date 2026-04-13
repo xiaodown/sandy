@@ -117,7 +117,6 @@ async def run_brain(
     runtime_state.update_turn_stage(trace, "brain")
     brain_response = await llm.ask_brain(
         ollama_history,
-        bot_name=bot_user.display_name,
         server_name=message.guild.name,
         channel_name=message.channel.name,
         rag_context=rag_context,

@@ -8,7 +8,7 @@ import sqlite3
 import json
 import os
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import Any
 from contextlib import contextmanager
 
 from .models import ChatMessageCreate, ChatMessageResponse
@@ -274,7 +274,7 @@ class ChatDatabase:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _insert_tags(self, conn: sqlite3.Connection, message_id: int, tags: List[str]):
+    def _insert_tags(self, conn: sqlite3.Connection, message_id: int, tags: list[str]):
         """Insert tags and link them to a message (within an open connection)."""
         for tag in tags:
             tag = tag.strip().lower()
@@ -287,7 +287,7 @@ class ChatDatabase:
                 (message_id, tag_id)
             )
 
-    def _get_tags_for_message(self, conn: sqlite3.Connection, message_id: int) -> List[str]:
+    def _get_tags_for_message(self, conn: sqlite3.Connection, message_id: int) -> list[str]:
         """Fetch tag names for a given message ID."""
         rows = conn.execute("""
             SELECT t.name FROM tags t
@@ -343,7 +343,7 @@ class ChatDatabase:
             conn.commit()
             return message_id
 
-    def get_message(self, message_id: int) -> Optional[ChatMessageResponse]:
+    def get_message(self, message_id: int) -> ChatMessageResponse | None:
         """Get a specific message by ID."""
         with self.get_connection() as conn:
             row = conn.execute(
@@ -357,20 +357,20 @@ class ChatDatabase:
         self,
         limit: int = 100,
         offset: int = 0,
-        author_id: Optional[int] = None,
-        author_name: Optional[str] = None,
-        discord_message_id: Optional[int] = None,
-        server_id: Optional[int] = None,
-        server_name: Optional[str] = None,
-        channel_id: Optional[int] = None,
-        channel_name: Optional[str] = None,
-        tag: Optional[str] = None,
-        q: Optional[str] = None,
-        since: Optional[datetime] = None,
-        until: Optional[datetime] = None,
-        hours_ago: Optional[int] = None,
-        minutes_ago: Optional[int] = None,
-    ) -> List[ChatMessageResponse]:
+        author_id: int | None = None,
+        author_name: str | None = None,
+        discord_message_id: int | None = None,
+        server_id: int | None = None,
+        server_name: str | None = None,
+        channel_id: int | None = None,
+        channel_name: str | None = None,
+        tag: str | None = None,
+        q: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        hours_ago: int | None = None,
+        minutes_ago: int | None = None,
+    ) -> list[ChatMessageResponse]:
         """Get messages with optional filtering. ID filters take precedence over name filters.
 
         hours_ago / minutes_ago — convenience shortcuts that override ``since``
@@ -458,7 +458,7 @@ class ChatDatabase:
             rows = conn.execute(query, params).fetchall()
             return [self._row_to_response(row, conn) for row in rows]
 
-    def get_message_by_discord_id(self, discord_message_id: int) -> Optional[ChatMessageResponse]:
+    def get_message_by_discord_id(self, discord_message_id: int) -> ChatMessageResponse | None:
         """Get a specific message by its original Discord snowflake, if stored."""
         with self.get_connection() as conn:
             row = conn.execute(
@@ -478,7 +478,7 @@ class ChatDatabase:
             conn.commit()
             return cursor.rowcount > 0
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Get basic statistics about stored messages."""
         with self.get_connection() as conn:
             total = conn.execute(

@@ -1,7 +1,5 @@
 """Reply splitting, truncation cleanup, and Discord delivery."""
 
-import re
-
 import discord
 
 from ..logconf import get_logger

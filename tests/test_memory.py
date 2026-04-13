@@ -288,6 +288,8 @@ async def test_process_and_store_formats_multiple_images_for_recall_and_vector()
 async def test_vector_query_passes_server_filter_to_chroma():
     recorded = {}
     vector_memory = VectorMemory.__new__(VectorMemory)
+    vector_memory._embed_model = "mxbai-embed-large"
+    vector_memory._max_distance = 0.6
     vector_memory._embed_client = SimpleNamespace(
         embed=AsyncMock(return_value=SimpleNamespace(embeddings=[[0.1, 0.2, 0.3]]))
     )
@@ -310,6 +312,8 @@ async def test_vector_query_passes_server_filter_to_chroma():
 @pytest.mark.asyncio
 async def test_vector_add_message_raises_on_embed_failure():
     vector_memory = VectorMemory.__new__(VectorMemory)
+    vector_memory._embed_model = "mxbai-embed-large"
+    vector_memory._max_distance = 0.6
     vector_memory._embed_client = SimpleNamespace(
         embed=AsyncMock(side_effect=RuntimeError("embed down"))
     )

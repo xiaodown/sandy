@@ -20,7 +20,6 @@ Usage:
 from collections import deque
 from dataclasses import dataclass, field as _dc_field
 from datetime import datetime, timezone
-from typing import Optional
 
 import discord
 
@@ -82,7 +81,6 @@ def resolve_mentions(content: str, mentions: list[discord.Member]) -> str:
     for member in mentions:
         name = member.display_name  # server nick > global display name
         content = content.replace(f"<@{member.id}>", name)
-        content = content.replace(f"<@!{member.id}>", name)  # legacy format
     return content
 
 
@@ -169,7 +167,7 @@ class ChannelHistory:
     # LLM-readable formatting
     # ------------------------------------------------------------------
 
-    def format(self, max_messages: Optional[int] = None) -> str:
+    def format(self, max_messages: int | None = None) -> str:
         """Return a natural-language block of text suitable for LLM context.
 
         Messages are shown oldest → newest (natural reading order).

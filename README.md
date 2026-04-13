@@ -29,6 +29,8 @@ Everything runs locally on a single machine. The LLM inference, the embeddings, 
 
 ## Architecture
 
+### Text pipeline
+
 ```
 Discord message arrives
   │
@@ -41,6 +43,19 @@ Discord message arrives
 ```
 
 The brain model does not do tool calling. That was tried and it was bad. The bouncer (running at low temperature with structured JSON output) makes the tool decision, the bot executes it, and the results are handed to the brain as pre-fetched context. The brain just talks.
+
+All configuration is centralized in `sandy/config.py` as frozen dataclasses, built from `.env` via `SandyConfig.from_env()`.
+
+### Voice
+
+Sandy can join voice channels. She listens via faster-whisper STT, generates short replies via the brain, and speaks via an external Qwen3-TTS service (in `tts_service/`).
+
+```bash
+!join [channel]    # join the specified (or your current) voice channel
+!leave             # leave the voice channel
+```
+
+Requires voice admin permission, set via `python -m sandy.maintenance set-voice-admin`.
 
 ## Requirements
 
@@ -260,22 +275,55 @@ Set `DB_DIR` for prod and `TEST_DB_DIR` for test in `.env`. `python -m sandy --t
 sandy/
 ├── sandy/                  # Python package
 │   ├── __main__.py         # entry point (python -m sandy)
+│   ├── config.py           # central config (SandyConfig.from_env())
 │   ├── bot.py              # Discord client lifecycle and event glue
-│   ├── llm.py              # ollama interface (brain, bouncer, tagger, summarizer, vision)
-│   ├── prompt.py           # all system prompts
+│   ├── prompt.py           # prompt factory (loads text from prompts/)
 │   ├── memory.py           # tag + summarize + store pipeline
-│   ├── pipeline.py         # message-turn orchestration
 │   ├── tools.py            # tool definitions and dispatch
 │   ├── registry.py         # server/channel/user lookup cache (SQLite)
 │   ├── last10.py           # per-channel message cache
 │   ├── vector_memory.py    # ChromaDB semantic memory
 │   ├── logconf.py          # logging config
-│   └── recall/             # long-term message storage
-│       ├── database.py     # SQLite + FTS5 operations
-│       └── models.py       # Pydantic models
-├── data/                   # runtime databases (gitignored)
+│   ├── trace.py            # per-turn trace dataclasses
+│   ├── runtime_state.py    # thread-safe observability snapshot
+│   ├── health.py           # startup health checks
+│   ├── api.py              # local observability HTTP API
+│   ├── paths.py            # path resolution helpers
+│   ├── llm/                # ollama interface subpackage
+│   │   ├── __init__.py     # OllamaInterface class + re-exports
+│   │   ├── models.py       # structured output schemas (Pydantic)
+│   │   └── coercion.py     # bouncer result coercion heuristics
+│   ├── pipeline/           # text message-turn orchestration
+│   │   ├── __init__.py     # build_pipeline() factory
+│   │   ├── orchestrator.py # SandyPipeline coordinator
+│   │   ├── bouncer.py      # bouncer stage
+│   │   ├── brain.py        # brain stage
+│   │   ├── reply.py        # Discord send (splits overlong)
+│   │   ├── retrieval.py    # RAG query stage
+│   │   ├── tool_dispatch.py# tool execution + result framing
+│   │   ├── attachments.py  # vision processing
+│   │   ├── memory_worker.py# supervised background queue
+│   │   └── tracing.py      # pipeline trace wiring
+│   ├── prompts/            # LLM prompt text files
+│   │   ├── brain_system.txt
+│   │   ├── bouncer_system.txt
+│   │   └── ...             # tagger, summarizer, vision, voice
+│   ├── recall/             # long-term message storage
+│   │   ├── database.py     # SQLite + FTS5 operations
+│   │   └── models.py       # Pydantic models
+│   └── voice/              # voice channel subpackage
+│       ├── manager.py      # VoiceManager (!join / !leave)
+│       ├── capture.py      # raw audio from Discord
+│       ├── stitching.py    # speech fragment assembly
+│       ├── stt.py          # faster-whisper transcription
+│       ├── tts.py          # Qwen3-TTS client
+│       ├── response.py     # voice reply generation
+│       └── history.py      # voice conversation history
+├── tests/                  # pytest suite (~180+ tests)
+├── tts_service/            # standalone Qwen3-TTS FastAPI service
+├── web/dashboard/          # local observability dashboard
 ├── searxng/                # SearXNG docker-compose
-├── docs/                   # images, etc.
+├── data/                   # runtime databases (gitignored)
 └── .env                    # configuration (gitignored)
 ```
 

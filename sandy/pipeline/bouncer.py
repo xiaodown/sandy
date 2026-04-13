@@ -42,7 +42,6 @@ async def run_bouncer(
     runtime_state.update_turn_stage(trace, "bouncer")
     bouncer_result = await llm.ask_bouncer(
         bouncer_context,
-        bot_name=bot_user.display_name,
         trace=trace,
     )
 

@@ -5,10 +5,13 @@ This module owns Discord client lifecycle, event registration, and orderly
 shutdown. The actual message pipeline lives in pipeline.py.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
 from collections.abc import Awaitable
+from typing import TYPE_CHECKING
 
 import discord
 from dotenv import load_dotenv
@@ -16,6 +19,9 @@ from dotenv import load_dotenv
 from .logconf import get_logger
 from .pipeline import SandyPipeline, build_pipeline
 from .runtime_state import RuntimeState
+
+if TYPE_CHECKING:
+    from .config import SandyConfig
 
 load_dotenv()
 
@@ -62,7 +68,24 @@ class BackgroundTaskSupervisor:
 
 background_tasks = BackgroundTaskSupervisor()
 runtime_state = RuntimeState()
-pipeline = build_pipeline(background_tasks=background_tasks, runtime_state=runtime_state)
+pipeline: SandyPipeline = None  # type: ignore[assignment]
+
+
+def setup(config: SandyConfig | None = None) -> None:
+    """Initialise the pipeline.  Call once from __main__ before bot.start().
+
+    If *config* is provided, it's threaded through to all sub-components
+    and ``DISCORD_API_KEY`` is pulled from the config object.  Otherwise
+    the module falls back to env-var construction (backward-compatible).
+    """
+    global pipeline, DISCORD_API_KEY
+    pipeline = build_pipeline(
+        background_tasks=background_tasks,
+        runtime_state=runtime_state,
+        config=config,
+    )
+    if config is not None and config.discord_api_key:
+        DISCORD_API_KEY = config.discord_api_key
 
 
 def _refresh_discord_runtime_state() -> None:
