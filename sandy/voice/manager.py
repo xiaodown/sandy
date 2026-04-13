@@ -2,23 +2,27 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
 import os
-import re
-from time import perf_counter, time
+from time import time
 from uuid import uuid4
 
 import discord
 
-from ..logconf import emit_forensic_record, get_logger
-from ..paths import resolve_runtime_path
+from ..logconf import get_logger
 from ..runtime_state import RuntimeState
-from ..trace import VoiceTurnTrace, event_payload, forensic_payload
 from .capture import CaptureJob, UtteranceCaptureSink
-from .history import VoiceHistory, VoiceHistoryEntry
-from .stt import FasterWhisperTranscriber, TranscriptResult
-from .tts import TtsServiceClient, TtsServiceConfig, wav_bytes_to_audio_source
+from .models import (
+    VoiceCommandResult,
+    VoiceSession,
+    _VOICE_CAPTURE_DIR,
+    _VOICE_IDLE_AUTO_LEAVE_SECONDS,
+    _VOICE_PREROLL_MS,
+    resolve_target_channel,
+)
+from .response import respond_to_session, store_voice_memory, warm_voice_models
+from .stitching import emit_completed_turn, handle_transcript, maybe_schedule_release
+from .stt import FasterWhisperTranscriber
+from .tts import TtsServiceClient, TtsServiceConfig
 
 try:
     from discord.ext import voice_recv
@@ -26,136 +30,6 @@ except Exception:  # pragma: no cover - import failure depends on environment
     voice_recv = None
 
 logger = get_logger("sandy.voice")
-
-_VOICE_CAPTURE_DIR = resolve_runtime_path(os.getenv("VOICE_CAPTURE_DIR", "data/prod/voice_captures"))
-_VOICE_PREROLL_MS = int(os.getenv("VOICE_PREROLL_MS", "250"))
-_VOICE_STITCH_GAP_SECONDS = float(os.getenv("VOICE_STITCH_GAP_SECONDS", "1.0"))
-_VOICE_STITCH_RELEASE_SECONDS = float(os.getenv("VOICE_STITCH_RELEASE_SECONDS", "1.35"))
-_VOICE_HISTORY_MAXLEN = int(os.getenv("VOICE_HISTORY_MAXLEN", "12"))
-_VOICE_IDLE_AUTO_LEAVE_SECONDS = int(os.getenv("VOICE_IDLE_AUTO_LEAVE_SECONDS", "300"))
-_VOICE_FORCE_RELEASE_SECONDS = float(os.getenv("VOICE_FORCE_RELEASE_SECONDS", "3.25"))
-_VOICE_REPLY_MAX_WORDS = int(os.getenv("VOICE_REPLY_MAX_WORDS", "32"))
-_VOICE_REPLY_MAX_CHARS = int(os.getenv("VOICE_REPLY_MAX_CHARS", "220"))
-_VOICE_REPLY_MAX_SENTENCES = int(os.getenv("VOICE_REPLY_MAX_SENTENCES", "2"))
-
-
-def _normalize_name(value: str) -> str:
-    return " ".join(value.lower().split())
-
-
-def _truncate_words(text: str, max_words: int) -> str:
-    words = text.split()
-    if len(words) <= max_words:
-        return text
-    return " ".join(words[:max_words]).rstrip(" ,;:-")
-
-
-def _truncate_sentences(text: str, max_sentences: int) -> str:
-    parts = re.split(r"(?<=[.!?])\s+", text.strip())
-    if len(parts) <= max_sentences:
-        return text
-    return " ".join(parts[:max_sentences]).strip()
-
-
-def _sanitize_voice_reply(text: str) -> str:
-    cleaned = " ".join(text.strip().split())
-    if not cleaned:
-        return ""
-    cleaned = _truncate_sentences(cleaned, _VOICE_REPLY_MAX_SENTENCES)
-    cleaned = _truncate_words(cleaned, _VOICE_REPLY_MAX_WORDS)
-    if len(cleaned) > _VOICE_REPLY_MAX_CHARS:
-        cleaned = cleaned[:_VOICE_REPLY_MAX_CHARS].rsplit(" ", 1)[0].rstrip(" ,;:-")
-    if cleaned and cleaned[-1] not in ".!?":
-        cleaned = f"{cleaned}."
-    return cleaned
-
-
-def resolve_target_channel(
-    guild: discord.Guild,
-    *,
-    query: str,
-    author_voice_channel: discord.VoiceChannel | None,
-) -> discord.VoiceChannel | None:
-    cleaned_query = query.strip()
-    if not cleaned_query:
-        return author_voice_channel
-
-    normalized_query = _normalize_name(cleaned_query)
-    channels = list(guild.voice_channels)
-
-    for channel in channels:
-        if _normalize_name(channel.name) == normalized_query:
-            return channel
-
-    partial_matches = [
-        channel for channel in channels
-        if normalized_query in _normalize_name(channel.name)
-    ]
-    if len(partial_matches) == 1:
-        return partial_matches[0]
-    return None
-
-
-@dataclass(slots=True)
-class PendingSpeakerTurn:
-    speaker_id: int
-    speaker_name: str
-    text: str
-    started_at: float
-    ended_at: float
-    fragment_count: int = 0
-    total_audio_seconds: float = 0.0
-    total_stt_elapsed_seconds: float = 0.0
-    transcripts: list[str] = field(default_factory=list)
-    release_task: asyncio.Task | None = None
-    force_release_task: asyncio.Task | None = None
-
-
-@dataclass(slots=True)
-class CompletedVoiceTurn:
-    speaker_id: int
-    speaker_name: str
-    text: str
-    started_at: float
-    ended_at: float
-    fragment_count: int
-    total_audio_seconds: float
-    total_stt_elapsed_seconds: float
-    transcripts: list[str]
-
-
-@dataclass(slots=True)
-class VoiceSession:
-    session_id: str
-    guild_id: int
-    guild_name: str
-    channel_id: int
-    channel_name: str
-    requested_by_user_id: int
-    requested_by_name: str
-    participant_names: list[str]
-    started_at: float
-    voice_client: discord.VoiceProtocol | None = None
-    history: VoiceHistory = field(default_factory=lambda: VoiceHistory(maxlen=_VOICE_HISTORY_MAXLEN))
-    pending_by_speaker: dict[int, PendingSpeakerTurn] = field(default_factory=dict)
-    pending_stt_counts: dict[int, int] = field(default_factory=dict)
-    active_speakers: set[int] = field(default_factory=set)
-    response_task: asyncio.Task | None = None
-    playback_active: bool = False
-    pending_response_needed: bool = False
-    pending_response_turns: list[CompletedVoiceTurn] = field(default_factory=list)
-    response_counter: int = 0
-    reply_counter: int = 0
-    last_activity_at: float = field(default_factory=time)
-    idle_task: asyncio.Task | None = None
-    sink: object | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class VoiceCommandResult:
-    handled: bool
-    reply: str | None = None
-    ok: bool = True
 
 
 class VoiceManager:
@@ -237,61 +111,6 @@ class VoiceManager:
             logger.exception("Voice task failed: %s", task.get_name())
         else:
             logger.info("Voice task completed: %s", task.get_name())
-
-    def _trace_event(
-        self,
-        trace: VoiceTurnTrace,
-        stage: str,
-        *,
-        status: str = "ok",
-        duration_ms: int | None = None,
-        **fields: object,
-    ) -> None:
-        payload = event_payload(
-            trace,
-            stage,
-            status=status,
-            duration_ms=duration_ms,
-            **fields,
-        )
-        logger.info(
-            "TRACE %s",
-            payload,
-            extra={"event_payload": payload, "log_to_console": False},
-        )
-
-    def _forensic_event(self, trace: VoiceTurnTrace, artifact: str, **fields: object) -> None:
-        emit_forensic_record(
-            logger,
-            f"FORENSIC {artifact}",
-            forensic_payload(trace, artifact, **fields),
-        )
-
-    def _build_voice_trace(
-        self,
-        session: VoiceSession,
-        *,
-        completed_turns: list[CompletedVoiceTurn],
-    ) -> VoiceTurnTrace:
-        if len({turn.speaker_id for turn in completed_turns}) == 1:
-            author_id = completed_turns[-1].speaker_id
-            author_name = completed_turns[-1].speaker_name
-        else:
-            author_id = 0
-            author_name = "multiple speakers"
-
-        return VoiceTurnTrace(
-            trace_id=f"voice:{session.session_id}:{session.response_counter}",
-            message_id=None,
-            guild_id=session.guild_id,
-            guild_name=session.guild_name,
-            channel_id=session.channel_id,
-            channel_name=session.channel_name,
-            author_id=author_id,
-            author_name=author_name,
-            started_at=perf_counter(),
-            session_id=session.session_id,
-        )
 
     async def handle_text_command(
         self,
@@ -486,7 +305,7 @@ class VoiceManager:
         session.active_speakers.discard(speaker_id)
         self.runtime_state.update_voice_stage(stage="stitch_wait", status="connected")
         logger.info("Voice speaker stop: speaker_id=%s", speaker_id)
-        self._maybe_schedule_release(session, speaker_id)
+        maybe_schedule_release(self, session, speaker_id)
 
     async def _run_stt_worker(self) -> None:
         while True:
@@ -518,526 +337,30 @@ class VoiceManager:
             finally:
                 self._stt_queue.task_done()
 
-    async def _handle_transcript(self, job: CaptureJob, result: TranscriptResult) -> None:
-        session = self._session
-        if session is None or session.guild_id != job.guild_id:
-            return
-        text = result.text.strip()
-        speaker_id = job.speaker_id
-        if speaker_id is not None:
-            session.pending_stt_counts[speaker_id] = max(session.pending_stt_counts.get(speaker_id, 1) - 1, 0)
-        if not text:
-            if speaker_id is not None:
-                self._maybe_schedule_release(session, speaker_id)
-            return
+    # ── Thin delegators to stitching.py / response.py ─────────────────────────
+    # These keep the method signatures tests expect on VoiceManager while the
+    # actual logic lives in the extracted modules.
 
-        session.last_activity_at = time()
-        self._arm_idle_timer(session)
-        if speaker_id is None:
-            # No stable speaker id; treat as immediate one-off turn.
-            await self._emit_completed_turn(
-                session,
-                completed_turn=CompletedVoiceTurn(
-                    speaker_id=0,
-                    speaker_name=job.speaker_label,
-                    text=text,
-                    started_at=job.started_at,
-                    ended_at=job.ended_at,
-                    fragment_count=1,
-                    total_audio_seconds=job.duration_seconds,
-                    total_stt_elapsed_seconds=result.elapsed_seconds,
-                    transcripts=[text],
-                ),
-            )
-            return
+    async def _handle_transcript(self, job, result):
+        await handle_transcript(self, job, result)
 
-        pending = session.pending_by_speaker.get(speaker_id)
-        if pending is not None and (job.started_at - pending.ended_at) <= _VOICE_STITCH_GAP_SECONDS:
-            pending.text = f"{pending.text} {text}".strip()
-            pending.ended_at = job.ended_at
-            pending.fragment_count += 1
-            pending.total_audio_seconds += job.duration_seconds
-            pending.total_stt_elapsed_seconds += result.elapsed_seconds
-            pending.transcripts.append(text)
-            if pending.release_task is not None:
-                pending.release_task.cancel()
-            if pending.force_release_task is not None:
-                pending.force_release_task.cancel()
-        else:
-            if pending is not None:
-                await self._release_pending_turn(session, speaker_id)
-            pending = PendingSpeakerTurn(
-                speaker_id=speaker_id,
-                speaker_name=job.speaker_label,
-                text=text,
-                started_at=job.started_at,
-                ended_at=job.ended_at,
-                fragment_count=1,
-                total_audio_seconds=job.duration_seconds,
-                total_stt_elapsed_seconds=result.elapsed_seconds,
-                transcripts=[text],
-            )
-            session.pending_by_speaker[speaker_id] = pending
+    async def _emit_completed_turn(self, session, *, completed_turn):
+        await emit_completed_turn(self, session, completed_turn=completed_turn)
 
-        self._maybe_schedule_release(session, speaker_id)
-        self._arm_force_release(session, speaker_id)
+    async def _respond_to_session(self, session_id):
+        await respond_to_session(self, session_id)
 
-    def _maybe_schedule_release(self, session: VoiceSession, speaker_id: int) -> None:
-        pending = session.pending_by_speaker.get(speaker_id)
-        if pending is None:
-            return
-        if session.pending_stt_counts.get(speaker_id, 0) > 0:
-            return
-        if speaker_id in session.active_speakers:
-            return
-        if pending.release_task is not None and not pending.release_task.done():
-            pending.release_task.cancel()
-        logger.info(
-            "Voice release scheduled: speaker_id=%s in %.2fs",
-            speaker_id,
-            _VOICE_STITCH_RELEASE_SECONDS,
-        )
-        pending.release_task = asyncio.create_task(
-            self._release_after_delay(session.session_id, speaker_id),
-            name=f"voice-release:{speaker_id}",
-        )
+    async def _play_source(self, session, source):
+        from .response import play_source
+        await play_source(session, source)
 
-    def _arm_force_release(self, session: VoiceSession, speaker_id: int) -> None:
-        pending = session.pending_by_speaker.get(speaker_id)
-        if pending is None:
-            return
-        if pending.force_release_task is not None and not pending.force_release_task.done():
-            pending.force_release_task.cancel()
-        pending.force_release_task = asyncio.create_task(
-            self._force_release_after_delay(session.session_id, speaker_id),
-            name=f"voice-force-release:{speaker_id}",
-        )
+    async def _store_voice_memory(self, session, *, message_id, author_name, text):
+        await store_voice_memory(self, session, message_id=message_id, author_name=author_name, text=text)
 
-    async def _release_after_delay(self, session_id: str, speaker_id: int) -> None:
-        await asyncio.sleep(_VOICE_STITCH_RELEASE_SECONDS)
-        session = self._session
-        if session is None or session.session_id != session_id:
-            return
-        if session.pending_stt_counts.get(speaker_id, 0) > 0 or speaker_id in session.active_speakers:
-            self._maybe_schedule_release(session, speaker_id)
-            return
-        await self._release_pending_turn(session, speaker_id)
+    async def _warm_voice_models(self):
+        await warm_voice_models(self)
 
-    async def _force_release_after_delay(self, session_id: str, speaker_id: int) -> None:
-        await asyncio.sleep(_VOICE_FORCE_RELEASE_SECONDS)
-        session = self._session
-        if session is None or session.session_id != session_id:
-            return
-        pending = session.pending_by_speaker.get(speaker_id)
-        if pending is None:
-            return
-        logger.warning(
-            "Voice force-release triggered: speaker_id=%s active=%s pending_stt=%s",
-            speaker_id,
-            speaker_id in session.active_speakers,
-            session.pending_stt_counts.get(speaker_id, 0),
-        )
-        session.active_speakers.discard(speaker_id)
-        await self._release_pending_turn(session, speaker_id)
-
-    async def _release_pending_turn(self, session: VoiceSession, speaker_id: int) -> None:
-        pending = session.pending_by_speaker.pop(speaker_id, None)
-        if pending is None:
-            return
-        if pending.release_task is not None and not pending.release_task.done():
-            pending.release_task.cancel()
-        if pending.force_release_task is not None and not pending.force_release_task.done():
-            pending.force_release_task.cancel()
-        logger.info(
-            "Voice turn released: speaker=%s text=%r",
-            pending.speaker_name,
-            pending.text,
-        )
-        await self._emit_completed_turn(
-            session,
-            completed_turn=CompletedVoiceTurn(
-                speaker_id=pending.speaker_id,
-                speaker_name=pending.speaker_name,
-                text=pending.text,
-                started_at=pending.started_at,
-                ended_at=pending.ended_at,
-                fragment_count=max(1, pending.fragment_count),
-                total_audio_seconds=pending.total_audio_seconds,
-                total_stt_elapsed_seconds=pending.total_stt_elapsed_seconds,
-                transcripts=list(pending.transcripts),
-            ),
-        )
-
-    async def _emit_completed_turn(
-        self,
-        session: VoiceSession,
-        *,
-        completed_turn: CompletedVoiceTurn,
-    ) -> None:
-        entry = VoiceHistoryEntry(
-            speaker_id=completed_turn.speaker_id,
-            speaker_name=completed_turn.speaker_name,
-            text=completed_turn.text,
-            created_at=datetime.now(UTC),
-            is_bot=False,
-        )
-        session.history.add(entry)
-        session.pending_response_turns.append(completed_turn)
-        session.pending_response_needed = True
-        logger.info(
-            "Voice turn appended: speaker=%s text=%r",
-            completed_turn.speaker_name,
-            completed_turn.text,
-        )
-        if session.response_task is None or session.response_task.done():
-            logger.info(
-                "Voice response task create: session_id=%s existing_done=%s pending_response_needed=%s",
-                session.session_id,
-                session.response_task.done() if session.response_task is not None else None,
-                session.pending_response_needed,
-            )
-            session.response_task = self._create_task(
-                self._respond_to_session(session.session_id),
-                name=f"voice-respond:{session.session_id}",
-            )
-        self._create_task(
-            self._store_voice_memory(
-                session,
-                message_id=(
-                    f"voice-human:{session.session_id}:{session.response_counter}:"
-                    f"{completed_turn.speaker_id}:{int(time() * 1000)}"
-                ),
-                author_name=completed_turn.speaker_name,
-                text=completed_turn.text,
-            ),
-            name=f"voice-store-human:{session.session_id}",
-        )
-
-    async def _respond_to_session(self, session_id: str) -> None:
-        logger.info("Voice response task entered: session_id=%s", session_id)
-        session = self._session
-        if session is None or session.session_id != session_id:
-            logger.warning("Voice response task exiting early: missing or replaced session")
-            return
-        if session.playback_active:
-            logger.warning("Voice response task exiting early: playback already active")
-            return
-
-        while session.pending_response_needed or session.pending_response_turns:
-            session.pending_response_needed = False
-            if self._bot_user is None:
-                logger.warning("Voice response task exiting early: bot user not set")
-                return
-            completed_turns = list(session.pending_response_turns)
-            session.pending_response_turns.clear()
-            if not completed_turns:
-                continue
-            session.response_counter += 1
-            trace = self._build_voice_trace(session, completed_turns=completed_turns)
-            latest_user_text = completed_turns[-1].text
-            combined_text = "\n".join(
-                f"{turn.speaker_name}: {turn.text}"
-                for turn in completed_turns
-            )
-            total_audio_ms = int(sum(turn.total_audio_seconds for turn in completed_turns) * 1000)
-            total_stt_ms = int(sum(turn.total_stt_elapsed_seconds for turn in completed_turns) * 1000)
-            total_fragments = sum(turn.fragment_count for turn in completed_turns)
-            self.runtime_state.update_voice_stage(
-                stage="turn_ready",
-                status="connected",
-                current_trace_id=trace.trace_id,
-                last_transcript=combined_text,
-                last_error=None,
-            )
-            self._trace_event(
-                trace,
-                "voice_turn_received",
-                author_is_bot=False,
-                audio_duration_ms=total_audio_ms,
-                stt_duration_ms=total_stt_ms,
-                fragment_count=total_fragments,
-                speaker_count=len({turn.speaker_id for turn in completed_turns}),
-                transcript_chars=len(combined_text),
-            )
-            self._forensic_event(
-                trace,
-                "turn_input",
-                raw_content=combined_text,
-                resolved_content=combined_text,
-                completed_turns=[
-                    {
-                        "speaker_id": turn.speaker_id,
-                        "speaker_name": turn.speaker_name,
-                        "text": turn.text,
-                        "fragment_count": turn.fragment_count,
-                        "audio_duration_ms": int(turn.total_audio_seconds * 1000),
-                        "stt_duration_ms": int(turn.total_stt_elapsed_seconds * 1000),
-                        "transcripts": list(turn.transcripts),
-                    }
-                    for turn in completed_turns
-                ],
-                participant_names=list(session.participant_names),
-                source="discord_voice",
-            )
-
-            history_messages = session.history.to_ollama_messages(self._bot_user.id)
-            retrieval_started = perf_counter()
-            self.runtime_state.update_voice_stage(
-                stage="retrieval",
-                status="connected",
-                current_trace_id=trace.trace_id,
-            )
-            rag_context = await self.vector_memory.query(latest_user_text, server_id=session.guild_id) if latest_user_text else ""
-            self._trace_event(
-                trace,
-                "retrieval_completed",
-                duration_ms=int((perf_counter() - retrieval_started) * 1000),
-                context_chars=len(rag_context or ""),
-            )
-            self._forensic_event(
-                trace,
-                "retrieval",
-                query_text=latest_user_text,
-                rag_context=rag_context,
-                ollama_history=history_messages,
-            )
-            logger.info(
-                "Voice brain start: latest_user_text=%r participant_count=%s history_messages=%s",
-                latest_user_text,
-                len(session.participant_names),
-                len(history_messages),
-            )
-            brain_started = perf_counter()
-            self.runtime_state.update_voice_stage(
-                stage="brain",
-                status="connected",
-                current_trace_id=trace.trace_id,
-            )
-            try:
-                brain = await self.llm.ask_brain(
-                    history_messages,
-                    bot_name=self._bot_user.display_name,
-                    server_name=session.guild_name,
-                    channel_name=session.channel_name,
-                    rag_context=rag_context,
-                    tool_context=None,
-                    mode="voice",
-                    participant_names=session.participant_names,
-                    trace=trace,
-                )
-            except Exception:
-                self._trace_event(trace, "brain_completed", status="error")
-                self._trace_event(
-                    trace,
-                    "turn_completed",
-                    status="error",
-                    duration_ms=int((perf_counter() - trace.started_at) * 1000),
-                    replied=False,
-                )
-                self.runtime_state.update_voice_stage(
-                    stage="brain",
-                    status="error",
-                    current_trace_id=trace.trace_id,
-                    last_error="Voice brain call failed",
-                )
-                logger.exception("Voice brain call failed")
-                continue
-            self._trace_event(
-                trace,
-                "brain_completed",
-                duration_ms=int((perf_counter() - brain_started) * 1000),
-                done_reason=brain.done_reason if brain is not None else None,
-                reply_chars=len((brain.content if brain is not None else "") or ""),
-            )
-            logger.info(
-                "Voice brain completed: has_response=%s",
-                bool(brain and getattr(brain, "content", "").strip()),
-            )
-            raw_reply = (brain.content if brain is not None else "").strip()
-            reply = _sanitize_voice_reply(raw_reply)
-            self._forensic_event(
-                trace,
-                "reply_output",
-                raw_reply=raw_reply,
-                finalized_reply=reply,
-                delivery_mode="voice",
-                done_reason=brain.done_reason if brain is not None else None,
-            )
-            if not reply:
-                self._trace_event(
-                    trace,
-                    "turn_completed",
-                    status="empty_reply",
-                    duration_ms=int((perf_counter() - trace.started_at) * 1000),
-                    replied=False,
-                )
-                self.runtime_state.update_voice_stage(
-                    stage="brain",
-                    status="idle",
-                    current_trace_id=trace.trace_id,
-                    last_reply="",
-                )
-                logger.warning("Voice brain returned empty reply")
-                continue
-            logger.info(
-                "Voice reply generated: raw=%r sanitized=%r",
-                raw_reply,
-                reply,
-            )
-            self.runtime_state.update_voice_stage(
-                stage="tts",
-                status="connected",
-                current_trace_id=trace.trace_id,
-                last_reply=reply,
-                last_error=None,
-            )
-
-            session.playback_active = True
-            delivered = False
-            try:
-                tts_started = perf_counter()
-                try:
-                    wav_bytes = await self._tts.synthesize_bytes(reply)
-                except Exception:
-                    fallback_reply = _sanitize_voice_reply(_truncate_words(reply, max(8, _VOICE_REPLY_MAX_WORDS // 2)))
-                    if fallback_reply and fallback_reply != reply:
-                        logger.warning(
-                            "Voice TTS failed for primary reply; retrying shorter fallback: %r",
-                            fallback_reply,
-                        )
-                        reply = fallback_reply
-                        wav_bytes = await self._tts.synthesize_bytes(reply)
-                    else:
-                        raise
-                self._trace_event(
-                    trace,
-                    "tts_completed",
-                    duration_ms=int((perf_counter() - tts_started) * 1000),
-                    wav_bytes=len(wav_bytes),
-                    reply_chars=len(reply),
-                )
-                self._forensic_event(
-                    trace,
-                    "voice_tts",
-                    request_text=reply,
-                    wav_bytes=len(wav_bytes),
-                )
-                source = wav_bytes_to_audio_source(wav_bytes)
-                logger.info("Voice playback start: reply=%r wav_bytes=%s", reply, len(wav_bytes))
-                playback_started = perf_counter()
-                self.runtime_state.update_voice_stage(
-                    stage="playback",
-                    status="connected",
-                    current_trace_id=trace.trace_id,
-                    last_reply=reply,
-                )
-                self._trace_event(trace, "playback_started", reply_chars=len(reply))
-                await self._play_source(session, source)
-                self._trace_event(
-                    trace,
-                    "playback_completed",
-                    duration_ms=int((perf_counter() - playback_started) * 1000),
-                    reply_chars=len(reply),
-                )
-                self._forensic_event(
-                    trace,
-                    "reply_delivery",
-                    finalized_reply=reply,
-                    delivery_mode="voice",
-                    wav_bytes=len(wav_bytes),
-                )
-                logger.info("Voice playback finished cleanly")
-                delivered = True
-            except Exception:
-                self._trace_event(trace, "tts_completed", status="error")
-                self.runtime_state.update_voice_stage(
-                    stage="tts",
-                    status="error",
-                    current_trace_id=trace.trace_id,
-                    last_error="Voice synthesis or playback failed",
-                )
-                logger.exception("Voice reply synthesis/playback failed in %s/%s", session.guild_name, session.channel_name)
-            finally:
-                session.playback_active = False
-
-            session.reply_counter += 1
-            entry = VoiceHistoryEntry(
-                speaker_id=self._bot_user.id,
-                speaker_name=self._bot_user.display_name,
-                text=reply,
-                created_at=datetime.now(UTC),
-                is_bot=True,
-            )
-            session.history.add(entry)
-            self._create_task(
-                self._store_voice_memory(
-                    session,
-                    message_id=f"voice-bot:{session.session_id}:{session.reply_counter}",
-                    author_name=self._bot_user.display_name,
-                    text=reply,
-                ),
-                name=f"voice-store-bot:{session.session_id}",
-            )
-            self._trace_event(
-                trace,
-                "turn_completed",
-                status="ok" if delivered else "error",
-                duration_ms=int((perf_counter() - trace.started_at) * 1000),
-                replied=delivered,
-            )
-            self.runtime_state.update_voice_stage(
-                stage="idle_in_channel",
-                status="connected" if delivered else "error",
-                current_trace_id=trace.trace_id,
-                last_reply=reply,
-            )
-
-    async def _play_source(self, session: VoiceSession, source: discord.AudioSource) -> None:
-        voice_client = session.voice_client
-        if voice_client is None or not voice_client.is_connected():
-            raise RuntimeError("voice client is not connected")
-
-        while voice_client.is_playing():
-            await asyncio.sleep(0.05)
-
-        loop = asyncio.get_running_loop()
-        done = loop.create_future()
-
-        def _after_playback(error: Exception | None) -> None:
-            if done.done():
-                return
-            if error is not None:
-                loop.call_soon_threadsafe(done.set_exception, error)
-            else:
-                loop.call_soon_threadsafe(done.set_result, None)
-
-        voice_client.play(source, after=_after_playback)
-        await done
-
-    async def _store_voice_memory(
-        self,
-        session: VoiceSession,
-        *,
-        message_id: str,
-        author_name: str,
-        text: str,
-    ) -> None:
-        try:
-            await self.vector_memory.add_message(
-                message_id=message_id,
-                content=text,
-                author_name=author_name,
-                server_id=session.guild_id,
-                timestamp=datetime.now(UTC),
-            )
-        except Exception:
-            logger.exception("Voice vector-memory store failed for %s", message_id)
-
-    async def _warm_voice_models(self) -> None:
-        with contextlib.suppress(Exception):
-            await self._transcriber.warmup()
-        with contextlib.suppress(Exception):
-            await self._tts.warmup()
+    # ── Remaining manager-owned methods ───────────────────────────────────────
 
     def _participant_names(
         self,

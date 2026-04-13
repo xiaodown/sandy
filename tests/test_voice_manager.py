@@ -10,7 +10,7 @@ import pytest
 from sandy.runtime_state import RuntimeState
 from sandy.voice import VoiceManager
 from sandy.voice.capture import CaptureJob
-from sandy.voice.manager import PendingSpeakerTurn
+from sandy.voice.models import PendingSpeakerTurn
 from sandy.voice.stt import TranscriptResult
 
 
@@ -338,3 +338,336 @@ async def test_voice_manager_disconnect_cancels_all_pending_release_tasks() -> N
     assert session.pending_by_speaker == {}
     assert session.pending_stt_counts == {}
     assert session.active_speakers == set()
+
+
+# ── Command edge cases ───────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_unrecognized_command_returns_not_handled() -> None:
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: True),
+        runtime_state=RuntimeState(),
+        llm=SimpleNamespace(),
+        vector_memory=SimpleNamespace(),
+    )
+    guild = DummyGuild(1, "Guild", [])
+    msg = DummyMessage(
+        guild=guild,
+        author=DummyAuthor(user_id=10, display_name="alice"),
+        content="!dance",
+    )
+
+    result = await manager.handle_text_command(msg, bot_user=SimpleNamespace(id=999))
+    assert result.handled is False
+
+
+@pytest.mark.asyncio
+async def test_non_command_message_returns_not_handled() -> None:
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: True),
+        runtime_state=RuntimeState(),
+        llm=SimpleNamespace(),
+        vector_memory=SimpleNamespace(),
+    )
+    guild = DummyGuild(1, "Guild", [])
+    msg = DummyMessage(
+        guild=guild,
+        author=DummyAuthor(user_id=10, display_name="alice"),
+        content="hey everyone",
+    )
+
+    result = await manager.handle_text_command(msg, bot_user=SimpleNamespace(id=999))
+    assert result.handled is False
+
+
+@pytest.mark.asyncio
+async def test_double_join_returns_error() -> None:
+    voice_channel = DummyVoiceChannel(
+        99, "ops war room",
+        members=[SimpleNamespace(id=10, display_name="alice")],
+    )
+    guild = DummyGuild(1, "Guild", [voice_channel])
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: True),
+        runtime_state=RuntimeState(),
+        llm=SimpleNamespace(),
+        vector_memory=SimpleNamespace(),
+    )
+    manager._warm_voice_models = AsyncMock()
+    author = DummyAuthor(user_id=10, display_name="alice", voice_channel=voice_channel)
+    bot = SimpleNamespace(id=999, display_name="Sandy")
+
+    first = await manager.handle_text_command(
+        DummyMessage(guild=guild, author=author, content="!join"), bot_user=bot,
+    )
+    assert first.ok is True
+
+    second = await manager.handle_text_command(
+        DummyMessage(guild=guild, author=author, content="!join"), bot_user=bot,
+    )
+    assert second.ok is False
+    assert "already" in second.reply
+
+
+@pytest.mark.asyncio
+async def test_leave_without_session_returns_error() -> None:
+    guild = DummyGuild(1, "Guild", [])
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: True),
+        runtime_state=RuntimeState(),
+        llm=SimpleNamespace(),
+        vector_memory=SimpleNamespace(),
+    )
+    result = await manager.handle_text_command(
+        DummyMessage(
+            guild=guild,
+            author=DummyAuthor(user_id=10, display_name="alice"),
+            content="!leave",
+        ),
+        bot_user=SimpleNamespace(id=999),
+    )
+    assert result.ok is False
+    assert "not in" in result.reply
+
+
+@pytest.mark.asyncio
+async def test_leave_denied_for_non_admin() -> None:
+    guild = DummyGuild(1, "Guild", [])
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: False),
+        runtime_state=RuntimeState(),
+        llm=SimpleNamespace(),
+        vector_memory=SimpleNamespace(),
+    )
+    result = await manager.handle_text_command(
+        DummyMessage(
+            guild=guild,
+            author=DummyAuthor(user_id=10, display_name="alice"),
+            content="!leave",
+        ),
+        bot_user=SimpleNamespace(id=999),
+    )
+    assert result.ok is False
+    assert "not allowed" in result.reply
+
+
+@pytest.mark.asyncio
+async def test_join_no_guild_returns_error() -> None:
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: True),
+        runtime_state=RuntimeState(),
+        llm=SimpleNamespace(),
+        vector_memory=SimpleNamespace(),
+    )
+    result = await manager.handle_text_command(
+        DummyMessage(
+            guild=None,
+            author=DummyAuthor(user_id=10, display_name="alice"),
+            content="!join",
+        ),
+        bot_user=SimpleNamespace(id=999),
+    )
+    assert result.ok is False
+    assert "servers" in result.reply
+
+
+@pytest.mark.asyncio
+async def test_leave_no_guild_returns_error() -> None:
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: True),
+        runtime_state=RuntimeState(),
+        llm=SimpleNamespace(),
+        vector_memory=SimpleNamespace(),
+    )
+    result = await manager.handle_text_command(
+        DummyMessage(
+            guild=None,
+            author=DummyAuthor(user_id=10, display_name="alice"),
+            content="!leave",
+        ),
+        bot_user=SimpleNamespace(id=999),
+    )
+    assert result.ok is False
+    assert "servers" in result.reply
+
+
+@pytest.mark.asyncio
+async def test_join_unresolvable_channel_returns_error() -> None:
+    guild = DummyGuild(1, "Guild", [DummyVoiceChannel(99, "music")])
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: True),
+        runtime_state=RuntimeState(),
+        llm=SimpleNamespace(),
+        vector_memory=SimpleNamespace(),
+    )
+    result = await manager.handle_text_command(
+        DummyMessage(
+            guild=guild,
+            author=DummyAuthor(user_id=10, display_name="alice", voice_channel=None),
+            content="!join nonexistent channel",
+        ),
+        bot_user=SimpleNamespace(id=999),
+    )
+    assert result.ok is False
+    assert "resolve" in result.reply
+
+
+# ── text_replies_paused ──────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_text_replies_paused_reflects_session_state() -> None:
+    voice_channel = DummyVoiceChannel(
+        99, "ops war room",
+        members=[SimpleNamespace(id=10, display_name="alice")],
+    )
+    guild = DummyGuild(1, "Guild", [voice_channel])
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: True),
+        runtime_state=RuntimeState(),
+        llm=SimpleNamespace(),
+        vector_memory=SimpleNamespace(),
+    )
+    manager._warm_voice_models = AsyncMock()
+
+    assert manager.text_replies_paused() is False
+
+    await manager.handle_text_command(
+        DummyMessage(
+            guild=guild,
+            author=DummyAuthor(user_id=10, display_name="alice", voice_channel=voice_channel),
+            content="!join",
+        ),
+        bot_user=SimpleNamespace(id=999, display_name="Sandy"),
+    )
+    assert manager.text_replies_paused() is True
+
+    await manager.handle_text_command(
+        DummyMessage(
+            guild=guild,
+            author=DummyAuthor(user_id=10, display_name="alice"),
+            content="!leave",
+        ),
+        bot_user=SimpleNamespace(id=999),
+    )
+    assert manager.text_replies_paused() is False
+
+
+# ── handle_voice_state_update ────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_voice_state_update_updates_participant_names() -> None:
+    voice_channel = DummyVoiceChannel(
+        99, "ops war room",
+        members=[SimpleNamespace(id=10, display_name="alice")],
+    )
+    guild = DummyGuild(1, "Guild", [voice_channel])
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: True),
+        runtime_state=RuntimeState(),
+        llm=SimpleNamespace(),
+        vector_memory=SimpleNamespace(),
+    )
+    manager._warm_voice_models = AsyncMock()
+    bot_user = SimpleNamespace(id=999, display_name="Sandy")
+
+    await manager.handle_text_command(
+        DummyMessage(
+            guild=guild,
+            author=DummyAuthor(user_id=10, display_name="alice", voice_channel=voice_channel),
+            content="!join",
+        ),
+        bot_user=bot_user,
+    )
+
+    # Simulate bob joining: update channel members, then fire voice state update
+    voice_channel.members.append(SimpleNamespace(id=20, display_name="bob"))
+    member = SimpleNamespace(id=20, guild=SimpleNamespace(id=1))
+    before = SimpleNamespace(channel=None)
+    after = SimpleNamespace(channel=voice_channel)
+
+    manager.handle_voice_state_update(member, before, after, bot_user=bot_user)
+
+    session = manager.active_session
+    assert "bob" in session.participant_names
+
+
+@pytest.mark.asyncio
+async def test_voice_state_update_ignores_other_guilds() -> None:
+    voice_channel = DummyVoiceChannel(
+        99, "ops war room",
+        members=[SimpleNamespace(id=10, display_name="alice")],
+    )
+    guild = DummyGuild(1, "Guild", [voice_channel])
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: True),
+        runtime_state=RuntimeState(),
+        llm=SimpleNamespace(),
+        vector_memory=SimpleNamespace(),
+    )
+    manager._warm_voice_models = AsyncMock()
+    bot_user = SimpleNamespace(id=999, display_name="Sandy")
+
+    await manager.handle_text_command(
+        DummyMessage(
+            guild=guild,
+            author=DummyAuthor(user_id=10, display_name="alice", voice_channel=voice_channel),
+            content="!join",
+        ),
+        bot_user=bot_user,
+    )
+
+    original_names = list(manager.active_session.participant_names)
+
+    # Event from a different guild — should be ignored
+    member = SimpleNamespace(id=20, guild=SimpleNamespace(id=999))
+    before = SimpleNamespace(channel=None)
+    after = SimpleNamespace(channel=SimpleNamespace(id=99))
+    manager.handle_voice_state_update(member, before, after, bot_user=bot_user)
+
+    assert manager.active_session.participant_names == original_names
+
+
+@pytest.mark.asyncio
+async def test_voice_state_update_noop_without_session() -> None:
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: True),
+        runtime_state=RuntimeState(),
+        llm=SimpleNamespace(),
+        vector_memory=SimpleNamespace(),
+    )
+    # Should not raise
+    member = SimpleNamespace(id=10, guild=SimpleNamespace(id=1))
+    before = SimpleNamespace(channel=None)
+    after = SimpleNamespace(channel=SimpleNamespace(id=99))
+    manager.handle_voice_state_update(member, before, after, bot_user=SimpleNamespace(id=999))
+
+
+# ── shutdown ─────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_shutdown_disconnects_and_stops_stt() -> None:
+    voice_channel = DummyVoiceChannel(
+        99, "ops war room",
+        members=[SimpleNamespace(id=10, display_name="alice")],
+    )
+    guild = DummyGuild(1, "Guild", [voice_channel])
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: True),
+        runtime_state=RuntimeState(),
+        llm=SimpleNamespace(),
+        vector_memory=SimpleNamespace(),
+    )
+    manager._warm_voice_models = AsyncMock()
+
+    await manager.handle_text_command(
+        DummyMessage(
+            guild=guild,
+            author=DummyAuthor(user_id=10, display_name="alice", voice_channel=voice_channel),
+            content="!join",
+        ),
+        bot_user=SimpleNamespace(id=999, display_name="Sandy"),
+    )
+    assert manager.active_session is not None
+
+    await manager.shutdown()
+    assert manager.active_session is None

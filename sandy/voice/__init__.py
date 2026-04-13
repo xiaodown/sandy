@@ -1,4 +1,5 @@
-from .manager import VoiceCommandResult, VoiceManager, VoiceSession, resolve_target_channel
+from .manager import VoiceManager
+from .models import VoiceCommandResult, VoiceSession, resolve_target_channel
 
 __all__ = [
     "VoiceCommandResult",

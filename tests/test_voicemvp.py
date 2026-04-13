@@ -1,13 +1,19 @@
+import io
+import struct
+import wave
 from types import SimpleNamespace
+
+import pytest
 
 from sandy.voice.capture import (
     _pcm_bytes_for_milliseconds,
     _slugify_capture_label,
     _voice_recv_listener,
 )
-from sandy.voice.manager import (
+from sandy.voice.models import (
     resolve_target_channel,
 )
+from sandy.voice.tts import wav_bytes_to_audio_source
 
 
 def _channel(name: str):
@@ -90,3 +96,71 @@ def test_voice_recv_listener_degrades_to_noop_when_extension_is_unavailable(monk
         return marker
 
     assert listener() is marker
+
+
+# ── wav_bytes_to_audio_source ────────────────────────────────────────────────
+
+def _make_wav(
+    *,
+    channels: int = 1,
+    sample_width: int = 2,
+    sample_rate: int = 48_000,
+    n_frames: int = 480,
+) -> bytes:
+    """Generate a minimal valid WAV file with the given params."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(sample_width)
+        wf.setframerate(sample_rate)
+        # Write silence (zeros)
+        wf.writeframes(b"\x00" * (n_frames * channels * sample_width))
+    return buf.getvalue()
+
+
+def test_wav_stereo_48k_passthrough():
+    """Stereo 48 kHz 16-bit should pass through without conversion."""
+    src = wav_bytes_to_audio_source(_make_wav(channels=2, sample_rate=48_000))
+    data = src.stream.getvalue()
+    assert isinstance(data, bytes)
+    assert len(data) > 0
+
+
+def test_wav_mono_converted_to_stereo():
+    """Mono input should be converted to stereo (double the samples)."""
+    n_frames = 480
+    wav = _make_wav(channels=1, sample_rate=48_000, n_frames=n_frames)
+    src = wav_bytes_to_audio_source(wav)
+    data = src.stream.getvalue()
+    # Stereo 16-bit: 2 channels × 2 bytes per sample × n_frames
+    assert len(data) == n_frames * 2 * 2
+
+
+def test_wav_sample_rate_converted_to_48k():
+    """Non-48kHz sample rate should be resampled."""
+    src = wav_bytes_to_audio_source(_make_wav(channels=2, sample_rate=24_000, n_frames=240))
+    data = src.stream.getvalue()
+    assert isinstance(data, bytes)
+    assert len(data) > 0
+
+
+def test_wav_mono_24k_converted():
+    """Mono 24 kHz should convert to stereo 48 kHz."""
+    src = wav_bytes_to_audio_source(_make_wav(channels=1, sample_rate=24_000, n_frames=240))
+    data = src.stream.getvalue()
+    assert isinstance(data, bytes)
+    assert len(data) > 0
+
+
+def test_wav_8bit_raises():
+    """8-bit WAV should raise ValueError."""
+    # wave module can't write 8-bit with setsampwidth(1) as 16-bit PCM,
+    # but we can craft it manually or use 1-byte sample width
+    with pytest.raises(ValueError, match="8-bit"):
+        wav_bytes_to_audio_source(_make_wav(sample_width=1))
+
+
+def test_wav_three_channels_raises():
+    """3-channel WAV should raise ValueError."""
+    with pytest.raises(ValueError, match="channel count"):
+        wav_bytes_to_audio_source(_make_wav(channels=3))

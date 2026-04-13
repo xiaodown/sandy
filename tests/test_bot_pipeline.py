@@ -142,20 +142,22 @@ def bot_module(monkeypatch):
     return bot_module
 
 
-def test_split_reply_respects_limit_and_boundaries(bot_module):
+def test_split_reply_respects_limit_and_boundaries():
+    from sandy.pipeline.reply import split_reply
     reply = "first paragraph\n\nsecond paragraph with extra words"
 
-    chunks = bot_module._split_reply(reply, limit=25)
+    chunks = split_reply(reply, limit=25)
 
     assert len(chunks) == 3
     assert all(len(chunk) <= 25 for chunk in chunks)
     assert chunks == ["first paragraph", "second paragraph with", "extra words"]
 
 
-def test_finalize_reply_trims_obvious_truncation(bot_module):
+def test_finalize_reply_trims_obvious_truncation():
+    from sandy.pipeline.brain import finalize_reply
     reply = "This is a complete sentence. This one got cut off in the"
 
-    finalized = bot_module._finalize_reply(reply, done_reason="length")
+    finalized = finalize_reply(reply, done_reason="length")
 
     assert finalized == "This is a complete sentence."
 
