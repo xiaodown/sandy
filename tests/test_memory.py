@@ -285,6 +285,209 @@ async def test_process_and_store_formats_multiple_images_for_recall_and_vector()
 
 
 @pytest.mark.asyncio
+async def test_enqueue_deferred_message_captures_attachment_metadata():
+    deferred_messages = []
+    db = SimpleNamespace(enqueue_deferred_message=lambda message: deferred_messages.append(message) or 1)
+    client = MemoryClient(db=db)
+    message = make_message(content="look later")
+    message.attachments = [
+        SimpleNamespace(
+            filename="puppy.png",
+            content_type="image/png",
+            size=4242,
+            url="https://cdn.test/puppy.png",
+            proxy_url="https://proxy.test/puppy.png",
+            width=320,
+            height=200,
+        )
+    ]
+
+    queue_id = await client.enqueue_deferred_message(message)
+
+    assert queue_id == 1
+    assert deferred_messages[0].discord_message_id == message.id
+    assert deferred_messages[0].attachment_payload == [{
+        "filename": "puppy.png",
+        "content_type": "image/png",
+        "size_bytes": 4242,
+        "url": "https://cdn.test/puppy.png",
+        "proxy_url": "https://proxy.test/puppy.png",
+        "width": 320,
+        "height": 200,
+    }]
+
+
+@pytest.mark.asyncio
+async def test_drain_deferred_messages_stores_recall_and_vector_then_deletes_queue_row():
+    deleted_ids = []
+    queued_row = SimpleNamespace(
+        id=7,
+        discord_message_id=888,
+        author_id=1,
+        author_name="alice",
+        channel_id=2,
+        channel_name="general",
+        server_id=3,
+        server_name="Guild",
+        content="queued later",
+        timestamp=datetime.now(UTC),
+        attachment_payload=None,
+    )
+    db = SimpleNamespace(
+        get_deferred_messages=lambda limit=100: [queued_row],
+        create_message=lambda message: None,
+        delete_deferred_message=lambda queue_id: deleted_ids.append(queue_id) or True,
+        record_deferred_message_failure=lambda queue_id, error: False,
+    )
+    llm = SimpleNamespace(
+        ask_tagger=AsyncMock(return_value=["tag"]),
+        ask_summarizer=AsyncMock(return_value=None),
+    )
+    vector_memory = SimpleNamespace(add_message=AsyncMock(return_value=True))
+    client = MemoryClient(db=db, llm=llm, vector_memory=vector_memory)
+
+    processed = await client.drain_deferred_messages()
+
+    assert processed == 1
+    assert deleted_ids == [7]
+    vector_memory.add_message.assert_awaited_once_with(
+        message_id="888",
+        content="queued later",
+        author_name="alice",
+        server_id=3,
+        timestamp=queued_row.timestamp,
+    )
+
+
+@pytest.mark.asyncio
+async def test_drain_deferred_messages_keeps_queue_row_when_vector_fails_after_recall():
+    deleted_ids = []
+    failure_records = []
+    created_messages = []
+    queued_row = SimpleNamespace(
+        id=7,
+        discord_message_id=888,
+        author_id=1,
+        author_name="alice",
+        channel_id=2,
+        channel_name="general",
+        server_id=3,
+        server_name="Guild",
+        content="queued later",
+        timestamp=datetime.now(UTC),
+        attachment_payload=None,
+    )
+    db = SimpleNamespace(
+        get_deferred_messages=lambda limit=100: [queued_row],
+        create_message=lambda message: created_messages.append(message),
+        get_message_by_discord_id=lambda discord_message_id: created_messages[0] if created_messages else None,
+        delete_deferred_message=lambda queue_id: deleted_ids.append(queue_id) or True,
+        record_deferred_message_failure=lambda queue_id, error: failure_records.append((queue_id, error)) or True,
+    )
+    llm = SimpleNamespace(
+        ask_tagger=AsyncMock(return_value=["tag"]),
+        ask_summarizer=AsyncMock(return_value=None),
+    )
+    vector_memory = SimpleNamespace(add_message=AsyncMock(side_effect=RuntimeError("vector down")))
+    client = MemoryClient(db=db, llm=llm, vector_memory=vector_memory)
+
+    processed = await client.drain_deferred_messages(limit=1)
+
+    assert processed == 0
+    assert deleted_ids == []
+    assert created_messages[0].discord_message_id == 888
+    assert failure_records == [(7, "vector down")]
+
+
+@pytest.mark.asyncio
+async def test_drain_deferred_messages_retries_vector_without_duplicate_recall_insert():
+    deleted_ids = []
+    created_messages = []
+    failure_records = []
+    queued_row = SimpleNamespace(
+        id=7,
+        discord_message_id=888,
+        author_id=1,
+        author_name="alice",
+        channel_id=2,
+        channel_name="general",
+        server_id=3,
+        server_name="Guild",
+        content="queued later",
+        timestamp=datetime.now(UTC),
+        attachment_payload=None,
+    )
+    calls = {"count": 0}
+
+    def get_rows(limit=100):
+        return [queued_row] if calls["count"] < 2 else []
+
+    def get_message_by_discord_id(discord_message_id):
+        return created_messages[0] if created_messages else None
+
+    async def add_message(**kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("vector down")
+        return True
+
+    db = SimpleNamespace(
+        get_deferred_messages=get_rows,
+        create_message=lambda message: created_messages.append(message),
+        get_message_by_discord_id=get_message_by_discord_id,
+        delete_deferred_message=lambda queue_id: deleted_ids.append(queue_id) or True,
+        record_deferred_message_failure=lambda queue_id, error: failure_records.append((queue_id, error)) or True,
+    )
+    llm = SimpleNamespace(
+        ask_tagger=AsyncMock(return_value=["tag"]),
+        ask_summarizer=AsyncMock(return_value=None),
+    )
+    vector_memory = SimpleNamespace(add_message=AsyncMock(side_effect=add_message))
+    client = MemoryClient(db=db, llm=llm, vector_memory=vector_memory)
+
+    first_processed = await client.drain_deferred_messages(limit=1)
+    second_processed = await client.drain_deferred_messages(limit=1)
+
+    assert first_processed == 0
+    assert second_processed == 1
+    assert len(created_messages) == 1
+    assert deleted_ids == [7]
+    assert failure_records == [(7, "vector down")]
+
+
+@pytest.mark.asyncio
+async def test_drain_deferred_messages_drops_image_only_row_when_attachment_is_gone():
+    deleted_ids = []
+    queued_row = SimpleNamespace(
+        id=7,
+        discord_message_id=888,
+        author_id=1,
+        author_name="alice",
+        channel_id=2,
+        channel_name="general",
+        server_id=3,
+        server_name="Guild",
+        content="",
+        timestamp=datetime.now(UTC),
+        attachment_payload=[{"filename": "puppy.png", "url": "https://cdn.test/puppy.png"}],
+    )
+    db = SimpleNamespace(
+        get_deferred_messages=lambda limit=100: [queued_row],
+        delete_deferred_message=lambda queue_id: deleted_ids.append(queue_id) or True,
+        record_deferred_message_failure=lambda queue_id, error: False,
+    )
+    client = MemoryClient(db=db, llm=SimpleNamespace(), vector_memory=SimpleNamespace())
+    client._describe_deferred_attachments = AsyncMock(return_value=None)
+    client._process_payload = AsyncMock()
+
+    processed = await client.drain_deferred_messages(limit=1)
+
+    assert processed == 0
+    assert deleted_ids == [7]
+    client._process_payload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_vector_query_passes_server_filter_to_chroma():
     recorded = {}
     vector_memory = VectorMemory.__new__(VectorMemory)

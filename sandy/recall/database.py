@@ -7,16 +7,21 @@ Previously served via FastAPI; now imported directly by memory.py and tools.py.
 import sqlite3
 import json
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from contextlib import contextmanager
 
-from .models import ChatMessageCreate, ChatMessageResponse
+from .models import (
+    ChatMessageCreate,
+    ChatMessageResponse,
+    DeferredMessageCreate,
+    DeferredMessageResponse,
+)
 
 class ChatDatabase:
     """SQLite database handler for chat messages."""
 
-    CURRENT_SCHEMA_VERSION = 4
+    CURRENT_SCHEMA_VERSION = 5
 
     def __init__(self, db_path: str = "data/recall.db"):
         """Initialize database connection.
@@ -90,6 +95,11 @@ class ChatDatabase:
                 self._migrate_v4_discord_message_ids()
                 self.set_schema_version(4)
                 print("✓ Migrated to version 4: Added Discord message snowflake column")
+
+            if current_version < 5:
+                self._migrate_v5_deferred_message_queue()
+                self.set_schema_version(5)
+                print("✓ Migrated to version 5: Added deferred message queue")
 
     def _migrate_v1_create_initial_schema(self):
         """Migration v1: Create the original name-based schema (kept for upgrade path)."""
@@ -224,6 +234,35 @@ class ChatDatabase:
             )
             conn.commit()
 
+    def _migrate_v5_deferred_message_queue(self):
+        """Migration v5: add a staging queue for text messages deferred during VC."""
+        with self.get_connection() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS deferred_message_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    discord_message_id INTEGER NOT NULL UNIQUE,
+                    author_id INTEGER NOT NULL,
+                    author_name TEXT NOT NULL DEFAULT '',
+                    channel_id INTEGER NOT NULL,
+                    channel_name TEXT NOT NULL DEFAULT '',
+                    server_id INTEGER NOT NULL,
+                    server_name TEXT NOT NULL DEFAULT '',
+                    content TEXT NOT NULL DEFAULT '',
+                    timestamp DATETIME NOT NULL,
+                    attachment_payload_json TEXT,
+                    queued_at DATETIME NOT NULL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT
+                )
+            """)
+            for idx_sql in [
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_deferred_discord_message_id ON deferred_message_queue(discord_message_id)",
+                "CREATE INDEX IF NOT EXISTS idx_deferred_queued_at ON deferred_message_queue(queued_at)",
+                "CREATE INDEX IF NOT EXISTS idx_deferred_server_channel ON deferred_message_queue(server_id, channel_id)",
+            ]:
+                conn.execute(idx_sql)
+            conn.commit()
+
     def _create_v2_tables(self, conn: sqlite3.Connection):
         """Create the v2 schema tables (called by migration; reuses an open connection)."""
         conn.execute("""
@@ -314,6 +353,30 @@ class ChatDatabase:
             timestamp=timestamp,
             tags=tags if tags else None,
             summary=row["summary"],
+        )
+
+    def _deferred_row_to_response(self, row: sqlite3.Row) -> DeferredMessageResponse:
+        """Convert a deferred queue row to a DeferredMessageResponse."""
+        timestamp = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
+        queued_at = datetime.fromisoformat(row["queued_at"].replace("Z", "+00:00"))
+        attachment_payload = None
+        if row["attachment_payload_json"]:
+            attachment_payload = json.loads(row["attachment_payload_json"])
+        return DeferredMessageResponse(
+            id=row["id"],
+            discord_message_id=row["discord_message_id"],
+            author_id=row["author_id"],
+            author_name=row["author_name"],
+            channel_id=row["channel_id"],
+            channel_name=row["channel_name"],
+            server_id=row["server_id"],
+            server_name=row["server_name"],
+            content=row["content"],
+            timestamp=timestamp,
+            attachment_payload=attachment_payload,
+            queued_at=queued_at,
+            attempt_count=row["attempt_count"],
+            last_error=row["last_error"],
         )
 
     # ------------------------------------------------------------------
@@ -468,6 +531,59 @@ class ChatDatabase:
             if row:
                 return self._row_to_response(row, conn)
             return None
+
+    def enqueue_deferred_message(self, message: DeferredMessageCreate) -> int:
+        """Insert a deferred queue row and return its queue ID."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO deferred_message_queue
+                    (discord_message_id, author_id, author_name, channel_id, channel_name,
+                     server_id, server_name, content, timestamp, attachment_payload_json, queued_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                message.discord_message_id,
+                message.author_id, message.author_name,
+                message.channel_id, message.channel_name,
+                message.server_id, message.server_name,
+                message.content,
+                message.timestamp.isoformat(),
+                json.dumps(message.attachment_payload) if message.attachment_payload is not None else None,
+                datetime.now(UTC).isoformat(),
+            ))
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_deferred_messages(self, *, limit: int = 100) -> list[DeferredMessageResponse]:
+        """Return deferred queue rows ordered oldest-first."""
+        with self.get_connection() as conn:
+            rows = conn.execute("""
+                SELECT * FROM deferred_message_queue
+                ORDER BY queued_at ASC, id ASC
+                LIMIT ?
+            """, (limit,)).fetchall()
+            return [self._deferred_row_to_response(row) for row in rows]
+
+    def delete_deferred_message(self, queue_id: int) -> bool:
+        """Delete one deferred queue row."""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM deferred_message_queue WHERE id = ?",
+                (queue_id,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def record_deferred_message_failure(self, queue_id: int, error: str) -> bool:
+        """Increment attempts and store the latest error for one deferred row."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                UPDATE deferred_message_queue
+                SET attempt_count = attempt_count + 1,
+                    last_error = ?
+                WHERE id = ?
+            """, (error, queue_id))
+            conn.commit()
+            return cursor.rowcount > 0
 
     def delete_message(self, message_id: int) -> bool:
         """Delete a message by ID. Returns True if deleted, False if not found."""

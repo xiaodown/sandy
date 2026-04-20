@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -107,6 +108,15 @@ class FakeMemoryWorker:
     async def enqueue(self, message, image_descriptions=None) -> None:
         self.steps.append("enqueue")
         self.calls.append((message, image_descriptions))
+
+
+class FakeMemoryClient:
+    def __init__(self) -> None:
+        self.deferred_calls: list[DummyMessage] = []
+
+    async def enqueue_deferred_message(self, message) -> int:
+        self.deferred_calls.append(message)
+        return 1
 
 
 def make_message(*, author_bot: bool = False, content: str = "hey sandy") -> DummyMessage:
@@ -230,10 +240,12 @@ async def test_text_replies_pause_while_voice_session_is_active(bot_module, monk
     message = make_message(content="still logging this")
     cache = FakeCache()
     memory_worker = FakeMemoryWorker()
+    memory = FakeMemoryClient()
     llm = SimpleNamespace(ask_bouncer=AsyncMock())
 
     monkeypatch.setattr(bot_module.pipeline, "cache", cache)
     monkeypatch.setattr(bot_module.pipeline, "memory_worker", memory_worker)
+    monkeypatch.setattr(bot_module.pipeline, "memory", memory)
     monkeypatch.setattr(bot_module.pipeline, "llm", llm)
     monkeypatch.setattr(
         bot_module.pipeline,
@@ -247,8 +259,53 @@ async def test_text_replies_pause_while_voice_session_is_active(bot_module, monk
     await bot_module.pipeline.handle_message(message, bot_user=SimpleNamespace(id=999, display_name="Sandy"))
 
     assert cache.added == [message]
-    assert memory_worker.calls == [(message, None)]
+    assert memory_worker.calls == []
+    assert memory.deferred_calls == [message]
     llm.ask_bouncer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_on_ready_starts_deferred_drain_when_not_in_voice(bot_module, monkeypatch):
+    runs = []
+    memory = SimpleNamespace(
+        seed_cache=AsyncMock(return_value=0),
+        drain_deferred_messages=AsyncMock(side_effect=lambda: runs.append("drain") or 0),
+    )
+    voice = SimpleNamespace(on_ready=AsyncMock(), is_active=lambda: False)
+    background_tasks = SimpleNamespace(
+        create_task=lambda coro, name: asyncio.create_task(coro, name=name),
+    )
+
+    monkeypatch.setattr(bot_module.pipeline, "memory", memory)
+    monkeypatch.setattr(bot_module.pipeline, "voice", voice)
+    monkeypatch.setattr(bot_module.pipeline, "background_tasks", background_tasks)
+    monkeypatch.setattr(bot_module.pipeline, "_cache_seeded", True)
+    monkeypatch.setattr(bot_module.pipeline, "_memory_worker_task", asyncio.create_task(asyncio.sleep(0)))
+
+    await bot_module.pipeline.on_ready(SimpleNamespace(user=SimpleNamespace(name="Sandy", id=999), guilds=[]))
+    await asyncio.sleep(0)
+
+    assert runs == ["drain"]
+
+
+@pytest.mark.asyncio
+async def test_deferred_drain_stops_when_voice_becomes_active(bot_module, monkeypatch):
+    states = iter([False, True])
+    runs = []
+    monkeypatch.setattr(
+        bot_module.pipeline,
+        "voice",
+        SimpleNamespace(is_active=lambda: next(states)),
+    )
+    monkeypatch.setattr(
+        bot_module.pipeline,
+        "memory",
+        SimpleNamespace(drain_deferred_messages=AsyncMock(side_effect=lambda: runs.append("drain") or 5)),
+    )
+
+    await bot_module.pipeline._run_deferred_drain_until_empty()
+
+    assert runs == ["drain"]
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@
 Pydantic models for the chat history API.
 """
 
+from typing import Any
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -78,3 +79,63 @@ class ChatMessageResponse(BaseModel):
     timestamp: datetime
     tags: list[str] | None = None
     summary: str | None = None
+
+
+class DeferredMessageCreate(BaseModel):
+    """Model for queueing a deferred message while VC is active."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "discord_message_id": 1482282320600891422,
+                "author_id": 215896334130905090,
+                "channel_id": 1359032552332621878,
+                "server_id": 1359032272382621875,
+                "author_name": "HappyUser",
+                "channel_name": "general",
+                "server_name": "Happy Friends Hangout",
+                "content": "hello while you were in voice",
+                "timestamp": "2026-04-20T10:30:00+00:00",
+                "attachment_payload": [
+                    {
+                        "filename": "puppy.png",
+                        "content_type": "image/png",
+                        "size_bytes": 424242,
+                        "url": "https://cdn.discordapp.com/...",
+                    }
+                ],
+            }
+        }
+    )
+
+    discord_message_id: int
+    author_id: int
+    channel_id: int
+    server_id: int
+    author_name: str = Field(..., min_length=1, max_length=255)
+    channel_name: str = Field(..., min_length=1, max_length=255)
+    server_name: str = Field(..., min_length=1, max_length=255)
+    content: str = Field(default="")
+    timestamp: datetime
+    attachment_payload: list[dict[str, Any]] | None = None
+
+
+class DeferredMessageResponse(BaseModel):
+    """Model for deferred-message queue rows."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    discord_message_id: int
+    author_id: int
+    channel_id: int
+    server_id: int
+    author_name: str
+    channel_name: str
+    server_name: str
+    content: str
+    timestamp: datetime
+    attachment_payload: list[dict[str, Any]] | None = None
+    queued_at: datetime
+    attempt_count: int = 0
+    last_error: str | None = None

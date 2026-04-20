@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import sandy
 
 
 def _load_local_main_module() -> types.ModuleType:
@@ -41,6 +42,7 @@ async def test_main_prewarm_uses_live_pipeline_after_setup(monkeypatch) -> None:
         from_env=lambda *, test_mode: fake_config,
     )
     monkeypatch.setitem(sys.modules, "sandy.config", fake_config_module)
+    monkeypatch.setattr(sandy, "config", fake_config_module, raising=False)
 
     async def fake_start(token: str) -> None:
         started_tokens.append(token)
@@ -62,6 +64,7 @@ async def test_main_prewarm_uses_live_pipeline_after_setup(monkeypatch) -> None:
 
     fake_bot_module.setup = fake_setup
     monkeypatch.setitem(sys.modules, "sandy.bot", fake_bot_module)
+    monkeypatch.setattr(sandy, "bot", fake_bot_module, raising=False)
 
     class FakeApiService:
         def __init__(self, *, pipeline, runtime_state, test_mode) -> None:
@@ -87,6 +90,7 @@ async def test_main_prewarm_uses_live_pipeline_after_setup(monkeypatch) -> None:
     fake_api_module.ApiService = FakeApiService
     fake_api_module.ApiServer = FakeApiServer
     monkeypatch.setitem(sys.modules, "sandy.api", fake_api_module)
+    monkeypatch.setattr(sandy, "api", fake_api_module, raising=False)
 
     result = await main_module._main(SimpleNamespace(test=False))
 

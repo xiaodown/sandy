@@ -671,3 +671,73 @@ async def test_shutdown_disconnects_and_stops_stt() -> None:
 
     await manager.shutdown()
     assert manager.active_session is None
+
+
+@pytest.mark.asyncio
+async def test_voice_session_end_triggers_tts_unload_and_end_callback() -> None:
+    voice_channel = DummyVoiceChannel(
+        99, "ops war room",
+        members=[SimpleNamespace(id=10, display_name="alice")],
+    )
+    guild = DummyGuild(1, "Guild", [voice_channel])
+    llm = SimpleNamespace(
+        loaded_model_names=AsyncMock(return_value=[]),
+        non_voice_model_names=lambda: [],
+        unload_model=AsyncMock(return_value=True),
+    )
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: True),
+        runtime_state=RuntimeState(),
+        llm=llm,
+        vector_memory=SimpleNamespace(),
+    )
+    manager._warm_voice_models = AsyncMock()
+    manager._tts = SimpleNamespace(unload=AsyncMock())
+    ended = []
+
+    async def on_ended() -> None:
+        ended.append("ended")
+
+    manager.set_on_session_ended(on_ended)
+
+    await manager.handle_text_command(
+        DummyMessage(
+            guild=guild,
+            author=DummyAuthor(user_id=10, display_name="alice", voice_channel=voice_channel),
+            content="!join",
+        ),
+        bot_user=SimpleNamespace(id=999, display_name="Sandy"),
+    )
+
+    await manager.handle_text_command(
+        DummyMessage(guild=guild, author=DummyAuthor(user_id=10, display_name="alice"), content="!leave"),
+        bot_user=SimpleNamespace(id=999, display_name="Sandy"),
+    )
+
+    manager._tts.unload.assert_awaited_once()
+    assert ended == ["ended"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_voice_models_unloads_loaded_non_voice_models_before_warmup() -> None:
+    order = []
+    llm = SimpleNamespace(
+        loaded_model_names=AsyncMock(side_effect=[["brain:latest", "vision-model", "small-model"], ["brain:latest"]]),
+        non_voice_model_names=lambda: ["vision-model", "small-model", "unused-model"],
+        unload_model=AsyncMock(side_effect=lambda model_name: order.append(f"unload:{model_name}") or True),
+    )
+    manager = VoiceManager(
+        registry=SimpleNamespace(is_voice_admin=lambda **_: True),
+        runtime_state=RuntimeState(),
+        llm=llm,
+        vector_memory=SimpleNamespace(),
+    )
+
+    async def fake_warm() -> None:
+        order.append("warm")
+
+    manager._warm_voice_models = fake_warm
+
+    await manager._prepare_voice_models()
+
+    assert order == ["unload:vision-model", "unload:small-model", "warm"]

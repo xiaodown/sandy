@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import io
 import logging
 import wave
@@ -135,6 +136,16 @@ class FasterCloneService:
     def warmup(self) -> None:
         self.synthesize_wav_bytes(self.config.warmup_text)
 
+    def unload(self) -> bool:
+        if self._model is None:
+            return False
+        self._model = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info("Unloaded FasterQwen3TTS model=%s", self.config.model_name)
+        return True
+
     def synthesize_wav_bytes(
         self,
         text: str,
@@ -228,6 +239,15 @@ def create_app() -> FastAPI:
             logger.exception("Fast TTS warmup failed")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {"status": "warmed"}
+
+    @app.post("/unload")
+    async def unload() -> dict[str, str]:
+        try:
+            unloaded = await asyncio.to_thread(service.unload)
+        except Exception as exc:
+            logger.exception("Fast TTS unload failed")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {"status": "unloaded" if unloaded else "idle"}
 
     @app.post("/synthesize")
     async def synthesize(request: SynthesizeRequest) -> Response:

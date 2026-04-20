@@ -74,6 +74,7 @@ class SandyPipeline:
         self.trace_event = trace_event
         self._cache_seeded = False
         self._memory_worker_task: asyncio.Task | None = None
+        self._deferred_drain_task: asyncio.Task | None = None
 
     # -- Delegate methods for test monkeypatching compatibility --
 
@@ -116,6 +117,7 @@ class SandyPipeline:
                 guild_count += 1
             ready_info += f"      * {bot.user.name} is on {guild_count} servers\n"
             logger.warning("\n\n%s", ready_info)
+        await self._maybe_start_deferred_drain()
 
     async def handle_control_message(self, message: discord.Message, *, bot_user) -> bool:
         result = await self.voice.handle_text_command(message, bot_user=bot_user)
@@ -124,6 +126,25 @@ class SandyPipeline:
         if result.reply:
             await message.channel.send(result.reply)
         return True
+
+    async def on_voice_session_ended(self) -> None:
+        await self._maybe_start_deferred_drain()
+
+    async def _maybe_start_deferred_drain(self) -> None:
+        if self.voice.is_active():
+            return
+        if self._deferred_drain_task is not None and not self._deferred_drain_task.done():
+            return
+        self._deferred_drain_task = self.background_tasks.create_task(
+            self._run_deferred_drain_until_empty(),
+            name="deferred-message-drain",
+        )
+
+    async def _run_deferred_drain_until_empty(self) -> None:
+        while not self.voice.is_active():
+            processed = await self.memory.drain_deferred_messages()
+            if processed == 0:
+                return
 
     def handle_voice_state_update(
         self,
@@ -212,11 +233,11 @@ class SandyPipeline:
                 )
                 return
 
-            # 4. Voice pause: cache + memory enqueue, skip reply
+            # 4. Voice pause: cache + deferred memory enqueue, skip reply
             if self.voice.text_replies_paused():
                 self.runtime_state.update_turn_stage(trace, "memory_enqueue")
                 paused_content = self._add_message_to_cache(message, [])
-                await self.memory_worker.enqueue(message)
+                await self.memory.enqueue_deferred_message(message)
                 self.trace_event(
                     trace,
                     "text_reply_paused_for_voice",

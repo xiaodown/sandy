@@ -86,6 +86,22 @@ class OllamaInterface:
         """Return whether an Ollama request currently holds the shared lock."""
         return self._lock.locked()
 
+    def non_voice_model_names(self) -> list[str]:
+        """Return configured Ollama models that voice mode does not need."""
+        names: list[str] = []
+        for model_name in (
+            self._cfg.bouncer_model,
+            self._cfg.tagger_model,
+            self._cfg.summarizer_model,
+            self._cfg.vision_model,
+            self._cfg.vision_router_model,
+        ):
+            if not model_name or model_name == self._cfg.brain_model:
+                continue
+            if model_name not in names:
+                names.append(model_name)
+        return names
+
     # ------------------------------------------------------------------
     # Health check
     # ------------------------------------------------------------------
@@ -97,6 +113,39 @@ class OllamaInterface:
             return True
         except Exception as exc:
             logger.warning("ollama health check failed: %s", exc)
+            return False
+
+    async def loaded_model_names(self) -> list[str]:
+        """Return currently loaded Ollama runner model names."""
+        try:
+            response = await self._client.ps()
+        except Exception as exc:
+            logger.warning("ollama ps failed: %s", exc)
+            return []
+        names: list[str] = []
+        for model in getattr(response, "models", []) or []:
+            name = getattr(model, "model", None) or getattr(model, "name", None)
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    async def unload_model(self, model_name: str) -> bool:
+        """Ask Ollama to unload one model runner."""
+        try:
+            async with self._lock:
+                await self._client.generate(
+                    model=model_name,
+                    prompt="",
+                    keep_alive=0,
+                    options={
+                        "num_predict": 0,
+                        "num_ctx": 1,
+                    },
+                )
+            logger.info("Requested Ollama unload for model %s", model_name)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to unload model %s: %s", model_name, exc)
             return False
 
     # -----------------------------------------------------------------

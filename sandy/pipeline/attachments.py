@@ -4,6 +4,7 @@ import io
 from dataclasses import dataclass
 
 import discord
+import httpx
 from PIL import Image
 
 from ..last10 import (
@@ -217,6 +218,60 @@ async def describe_prepared_attachments(prepared: AttachmentPreparationResult, l
         fallback_count=len(fallback_reasons),
         fallback_reasons=fallback_reasons or None,
     )
+
+
+async def describe_deferred_attachment_payload(
+    attachment_payload: list[dict],
+    llm,
+) -> AttachmentProcessingResult:
+    """Describe queued attachment metadata after VC ends.
+
+    Unlike live attachment handling, deferred processing silently skips images
+    that can no longer be retrieved. We only return successful descriptions.
+    """
+    prepared: list[PreparedAttachment] = []
+
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        for item in attachment_payload:
+            content_type = ((item.get("content_type") or "").split(";")[0].strip().lower())
+            filename = item.get("filename") or "attachment"
+            if content_type not in _VISION_CONTENT_TYPES:
+                continue
+            size_bytes = int(item.get("size_bytes") or 0)
+            if size_bytes > _MAX_IMAGE_BYTES:
+                continue
+
+            image_url = item.get("proxy_url") or item.get("url")
+            if not image_url:
+                continue
+            try:
+                response = await client.get(image_url)
+                response.raise_for_status()
+                image_bytes = response.content
+            except Exception as exc:
+                logger.error("Failed to download deferred attachment %s: %s", filename, exc)
+                continue
+            if content_type == "image/webp":
+                try:
+                    with Image.open(io.BytesIO(image_bytes)) as img:
+                        buf = io.BytesIO()
+                        img.convert("RGB").save(buf, format="JPEG", quality=90)
+                        image_bytes = buf.getvalue()
+                except Exception as exc:
+                    logger.error("Deferred WebP conversion failed for %s: %s", filename, exc)
+                    continue
+            prepared.append(PreparedAttachment(filename=filename, image_bytes=image_bytes))
+
+    result = await describe_prepared_attachments(
+        AttachmentPreparationResult(
+            attachments=prepared,
+            fallback_count=0,
+            fallback_reasons=None,
+        ),
+        llm,
+        detail=True,
+    )
+    return result
 
 
 def build_augmented_content(message: discord.Message, descriptions: list[str]) -> str:

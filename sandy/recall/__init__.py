@@ -15,6 +15,17 @@ Public API:
 """
 
 from .database import ChatDatabase
-from .models import ChatMessageCreate, ChatMessageResponse
+from .models import (
+    ChatMessageCreate,
+    ChatMessageResponse,
+    DeferredMessageCreate,
+    DeferredMessageResponse,
+)
 
-__all__ = ["ChatDatabase", "ChatMessageCreate", "ChatMessageResponse"]
+__all__ = [
+    "ChatDatabase",
+    "ChatMessageCreate",
+    "ChatMessageResponse",
+    "DeferredMessageCreate",
+    "DeferredMessageResponse",
+]

@@ -40,6 +40,16 @@ class TtsServiceClient:
     async def warmup(self) -> None:
         await asyncio.to_thread(self.warmup_sync)
 
+    def unload_sync(self) -> None:
+        response = httpx.post(
+            f"{self.config.base_url.rstrip('/')}/unload",
+            timeout=self.config.timeout_seconds,
+        )
+        response.raise_for_status()
+
+    async def unload(self) -> None:
+        await asyncio.to_thread(self.unload_sync)
+
     def synthesize_bytes_sync(
         self,
         text: str,

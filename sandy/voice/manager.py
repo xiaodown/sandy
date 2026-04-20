@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Awaitable, Callable
 from time import time
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -60,6 +61,7 @@ class VoiceManager:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stt_queue: asyncio.Queue[CaptureJob | object] = asyncio.Queue()
         self._stt_worker_task: asyncio.Task | None = None
+        self._on_session_ended: Callable[[], Awaitable[None]] | None = None
 
         if voice_config is not None:
             cfg = voice_config
@@ -95,6 +97,9 @@ class VoiceManager:
 
     def is_voice_admin(self, member: discord.abc.User, *, guild_id: int) -> bool:
         return self.registry.is_voice_admin(user_id=member.id, server_id=guild_id)
+
+    def set_on_session_ended(self, callback: Callable[[], Awaitable[None]] | None) -> None:
+        self._on_session_ended = callback
 
     async def on_ready(self, bot: discord.Client) -> None:
         self._loop = asyncio.get_running_loop()
@@ -198,7 +203,7 @@ class VoiceManager:
         self._attach_receive_probe(voice_client)
         self._arm_idle_timer(self._session)
         self._sync_runtime_state(status="connected", stage="idle_in_channel")
-        self._create_task(self._warm_voice_models(), name="voice-warmup")
+        self._create_task(self._prepare_voice_models(), name="voice-model-prepare")
         logger.info(
             "Voice session started: guild=%s channel=%s requested_by=%s",
             message.guild.name,
@@ -428,6 +433,9 @@ class VoiceManager:
                     voice_client.stop_listening()
             with contextlib.suppress(Exception):
                 await voice_client.disconnect(force=True)
+        await self._exit_low_memory_voice_mode()
+        if self._on_session_ended is not None:
+            await self._on_session_ended()
 
     def _sync_runtime_state(self, *, status: str, stage: str | None = None) -> None:
         session = self._session
@@ -446,3 +454,47 @@ class VoiceManager:
             participant_names=session.participant_names,
             session_started_at=session.started_at,
         )
+
+    async def _enter_low_memory_voice_mode(self) -> None:
+        if not hasattr(self.llm, "loaded_model_names") or not hasattr(self.llm, "non_voice_model_names"):
+            return
+        loaded_before = await self.llm.loaded_model_names()
+        non_voice_models = self.llm.non_voice_model_names()
+        loaded_targets = [
+            loaded_name
+            for loaded_name in loaded_before
+            if any(self._model_names_match(configured_name, loaded_name) for configured_name in non_voice_models)
+        ]
+        if loaded_targets:
+            logger.info(
+                "Entering low-memory voice mode; unloading non-voice models: %s",
+                ", ".join(loaded_targets),
+            )
+        for model_name in loaded_targets:
+            if hasattr(self.llm, "unload_model"):
+                await self.llm.unload_model(model_name)
+        loaded_after = await self.llm.loaded_model_names()
+        logger.info(
+            "Low-memory voice mode entered; loaded_models before=%s after=%s",
+            loaded_before,
+            loaded_after,
+        )
+
+    async def _exit_low_memory_voice_mode(self) -> None:
+        if hasattr(self._tts, "unload"):
+            with contextlib.suppress(Exception):
+                await self._tts.unload()
+
+    async def _prepare_voice_models(self) -> None:
+        await self._enter_low_memory_voice_mode()
+        await self._warm_voice_models()
+
+    @staticmethod
+    def _model_names_match(configured_name: str, loaded_name: str) -> bool:
+        if configured_name == loaded_name:
+            return True
+        if configured_name.endswith(":latest") and configured_name[:-7] == loaded_name:
+            return True
+        if loaded_name.endswith(":latest") and loaded_name[:-7] == configured_name:
+            return True
+        return False

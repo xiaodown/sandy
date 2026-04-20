@@ -117,7 +117,7 @@ def build_pipeline(
     cache = Last10(maxlen=10, registry=registry)
     memory_worker = MemoryWorker(memory.process_and_store, runtime_state=runtime_state)
 
-    return SandyPipeline(
+    pipeline = SandyPipeline(
         background_tasks=background_tasks,
         registry=registry,
         cache=cache,
@@ -131,6 +131,8 @@ def build_pipeline(
         tools_module=tools,
         trace_event=trace_event,
     )
+    voice.set_on_session_ended(pipeline.on_voice_session_ended)
+    return pipeline
 
 
 __all__ = [
