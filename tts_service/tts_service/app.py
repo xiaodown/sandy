@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
-import os
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,38 +26,67 @@ DEFAULT_CLONE_REF_AUDIO = str(SERVICE_ROOT / "assets" / "clone_reference.wav")
 
 @dataclass(frozen=True, slots=True)
 class ServiceConfig:
-    model_name: str = os.getenv("TTS_SERVICE_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-    language: str = os.getenv("TTS_SERVICE_LANGUAGE", "English")
-    clone_ref_audio_path: str = os.getenv(
-        "TTS_SERVICE_CLONE_REF_AUDIO",
-        DEFAULT_CLONE_REF_AUDIO,
-    )
-    clone_ref_text: str = os.getenv(
-        "TTS_SERVICE_CLONE_REF_TEXT",
-        "goodnight robst. sleep well, dream of snacks and revenge.",
-    )
-    clone_xvec_only: bool = os.getenv(
-        "TTS_SERVICE_CLONE_XVECTOR_ONLY",
-        "true",
-    ).strip().lower() in {"1", "true", "yes", "on"}
-    device: str = os.getenv("TTS_SERVICE_DEVICE", "cuda")
-    dtype: str = os.getenv("TTS_SERVICE_DTYPE", "bfloat16")
-    attn_implementation: str = os.getenv("TTS_SERVICE_ATTN_IMPLEMENTATION", "sdpa")
-    max_seq_len: int = int(os.getenv("TTS_SERVICE_MAX_SEQ_LEN", "2048"))
-    max_new_tokens: int = int(os.getenv("TTS_SERVICE_MAX_NEW_TOKENS", "512"))
-    min_new_tokens: int = int(os.getenv("TTS_SERVICE_MIN_NEW_TOKENS", "2"))
-    do_sample: bool = os.getenv("TTS_SERVICE_DO_SAMPLE", "false").strip().lower() in {
-        "1", "true", "yes", "on",
-    }
-    temperature: float = float(os.getenv("TTS_SERVICE_TEMPERATURE", "0.9"))
-    top_k: int = int(os.getenv("TTS_SERVICE_TOP_K", "50"))
-    top_p: float = float(os.getenv("TTS_SERVICE_TOP_P", "1.0"))
-    repetition_penalty: float = float(os.getenv("TTS_SERVICE_REPETITION_PENALTY", "1.05"))
-    non_streaming_mode: bool = os.getenv("TTS_SERVICE_NON_STREAMING_MODE", "false").strip().lower() in {
-        "1", "true", "yes", "on",
-    }
-    max_audio_seconds: float = float(os.getenv("TTS_SERVICE_MAX_AUDIO_SECONDS", "20"))
-    warmup_text: str = os.getenv("TTS_SERVICE_WARMUP_TEXT", "hello there")
+    model_name: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+    language: str = "English"
+    clone_ref_audio_path: str = DEFAULT_CLONE_REF_AUDIO
+    clone_ref_text: str = "goodnight robst. sleep well, dream of snacks and revenge."
+    clone_xvec_only: bool = True
+    device: str = "cuda"
+    dtype: str = "bfloat16"
+    attn_implementation: str = "sdpa"
+    max_seq_len: int = 2048
+    max_new_tokens: int = 512
+    min_new_tokens: int = 2
+    do_sample: bool = False
+    temperature: float = 0.9
+    top_k: int = 50
+    top_p: float = 1.0
+    repetition_penalty: float = 1.05
+    non_streaming_mode: bool = False
+    max_audio_seconds: float = 20.0
+    warmup_text: str = "hello there"
+
+    @classmethod
+    def from_env(cls) -> "ServiceConfig":
+        import os
+
+        def _str(name: str, default: str) -> str:
+            return os.getenv(name, default)
+
+        def _int(name: str, default: int) -> int:
+            return int(os.getenv(name, str(default)))
+
+        def _float(name: str, default: float) -> float:
+            return float(os.getenv(name, str(default)))
+
+        def _bool(name: str, default: bool) -> bool:
+            value = os.getenv(name)
+            if value is None:
+                return default
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+
+        defaults = cls()
+        return cls(
+            model_name=_str("TTS_SERVICE_MODEL", defaults.model_name),
+            language=_str("TTS_SERVICE_LANGUAGE", defaults.language),
+            clone_ref_audio_path=_str("TTS_SERVICE_CLONE_REF_AUDIO", defaults.clone_ref_audio_path),
+            clone_ref_text=_str("TTS_SERVICE_CLONE_REF_TEXT", defaults.clone_ref_text),
+            clone_xvec_only=_bool("TTS_SERVICE_CLONE_XVECTOR_ONLY", defaults.clone_xvec_only),
+            device=_str("TTS_SERVICE_DEVICE", defaults.device),
+            dtype=_str("TTS_SERVICE_DTYPE", defaults.dtype),
+            attn_implementation=_str("TTS_SERVICE_ATTN_IMPLEMENTATION", defaults.attn_implementation),
+            max_seq_len=_int("TTS_SERVICE_MAX_SEQ_LEN", defaults.max_seq_len),
+            max_new_tokens=_int("TTS_SERVICE_MAX_NEW_TOKENS", defaults.max_new_tokens),
+            min_new_tokens=_int("TTS_SERVICE_MIN_NEW_TOKENS", defaults.min_new_tokens),
+            do_sample=_bool("TTS_SERVICE_DO_SAMPLE", defaults.do_sample),
+            temperature=_float("TTS_SERVICE_TEMPERATURE", defaults.temperature),
+            top_k=_int("TTS_SERVICE_TOP_K", defaults.top_k),
+            top_p=_float("TTS_SERVICE_TOP_P", defaults.top_p),
+            repetition_penalty=_float("TTS_SERVICE_REPETITION_PENALTY", defaults.repetition_penalty),
+            non_streaming_mode=_bool("TTS_SERVICE_NON_STREAMING_MODE", defaults.non_streaming_mode),
+            max_audio_seconds=_float("TTS_SERVICE_MAX_AUDIO_SECONDS", defaults.max_audio_seconds),
+            warmup_text=_str("TTS_SERVICE_WARMUP_TEXT", defaults.warmup_text),
+        )
 
 
 class SynthesizeRequest(BaseModel):
@@ -186,7 +214,7 @@ def _waveform_duration_seconds(waveform, sample_rate: int) -> float:
 
 def create_app() -> FastAPI:
     app = FastAPI()
-    service = FasterCloneService(ServiceConfig())
+    service = FasterCloneService(ServiceConfig.from_env())
 
     @app.get("/health")
     async def health() -> dict[str, str]:

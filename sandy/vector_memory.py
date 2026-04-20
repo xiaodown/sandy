@@ -26,31 +26,20 @@ be pulled in ollama before the bot starts.  Embeddings are generated via the
 async ollama Python client.
 """
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import chromadb
 import ollama
-from dotenv import load_dotenv
 
 from .logconf import get_logger
 from .paths import resolve_runtime_path
 
-load_dotenv()
-
 logger = get_logger(__name__)
 
 _PACIFIC      = ZoneInfo("America/Los_Angeles")
-_EMBED_MODEL  = os.getenv("EMBED_MODEL", "mxbai-embed-large")
 _COLLECTION   = "sandy_messages"
-
-# Cosine distance threshold — results above this value are discarded as
-# too dissimilar.  Cosine distance ranges 0 (identical) → 2 (opposite);
-# 0.6 is a fairly generous cutoff.  Tune downward if irrelevant memories
-# appear too often.
-_MAX_DISTANCE = float(os.getenv("VECTOR_MAX_DISTANCE", "0.6"))
 
 
 class VectorMemory:
@@ -82,7 +71,18 @@ class VectorMemory:
         embed_model: str | None = None,
         max_distance: float | None = None,
     ) -> None:
-        _db_dir = resolve_runtime_path(db_dir or os.getenv("DB_DIR", "data/prod/"))
+        if db_dir is None or embed_model is None or max_distance is None:
+            from .config import SandyConfig
+
+            storage_cfg = SandyConfig.from_env().storage
+            if db_dir is None:
+                db_dir = storage_cfg.db_dir
+            if embed_model is None:
+                embed_model = storage_cfg.embed_model
+            if max_distance is None:
+                max_distance = storage_cfg.vector_max_distance
+
+        _db_dir = resolve_runtime_path(db_dir)
         chroma_path = _db_dir / "chroma"
         chroma_path.mkdir(parents=True, exist_ok=True)
         try:
@@ -94,8 +94,8 @@ class VectorMemory:
             name=_COLLECTION,
             metadata={"hnsw:space": "cosine"},
         )
-        self._embed_model = embed_model or _EMBED_MODEL
-        self._max_distance = max_distance if max_distance is not None else _MAX_DISTANCE
+        self._embed_model = embed_model
+        self._max_distance = max_distance
         self._embed_client = ollama.AsyncClient()
         logger.info(
             "VectorMemory ready (path=%r, collection=%r, docs=%d)",
@@ -206,7 +206,7 @@ class VectorMemory:
             else:
                 logger.debug(
                     "VectorMemory.query → 0 result(s) within threshold (%.2f) for server %d",
-                    _MAX_DISTANCE, server_id,
+                    self._max_distance, server_id,
                 )
             return "\n".join(lines)
         except Exception as exc:

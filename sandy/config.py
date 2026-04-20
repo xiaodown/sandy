@@ -16,6 +16,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dotenv import find_dotenv, load_dotenv
+
 from .paths import resolve_runtime_path
 
 
@@ -164,6 +166,7 @@ class SandyConfig:
     @classmethod
     def from_env(cls, *, test_mode: bool = False) -> SandyConfig:
         """Read all environment variables and return a fully populated config."""
+        load_dotenv(find_dotenv(usecwd=True))
 
         def _str(name: str, default: str) -> str:
             return os.getenv(name, default)

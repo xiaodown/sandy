@@ -21,11 +21,9 @@ into the brain's context before asking it to respond.
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import TYPE_CHECKING
 
 import ollama
-from dotenv import load_dotenv
 
 from ..prompt import SandyPrompt
 from ..logconf import emit_forensic_record, get_logger
@@ -46,8 +44,6 @@ from .coercion import (
 if TYPE_CHECKING:
     from ..config import LlmConfig
 
-load_dotenv()
-
 logger = get_logger(__name__)
 
 
@@ -58,40 +54,10 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 def _default_llm_config() -> "LlmConfig":
-    """Build an LlmConfig from env vars.  Import is deferred to avoid a
-    circular dependency at module level."""
-    from ..config import LlmConfig
+    """Build an LlmConfig via the central SandyConfig loader."""
+    from ..config import SandyConfig
 
-    # Frozen slotted dataclasses don't expose defaults as class attributes.
-    # Instantiate once with all defaults to get them as a reference.
-    _d = LlmConfig()
-
-    return LlmConfig(
-        brain_model=os.getenv("BRAIN_MODEL", _d.brain_model),
-        bouncer_model=os.getenv("BOUNCER_MODEL", _d.bouncer_model),
-        tagger_model=os.getenv("TAGGER_MODEL", _d.tagger_model),
-        summarizer_model=os.getenv("SUMMARIZER_MODEL", _d.summarizer_model),
-        vision_model=os.getenv("VISION_MODEL") or None,
-        vision_router_model=os.getenv("VISION_ROUTER_MODEL") or None,
-        brain_temperature=float(os.getenv("BRAIN_TEMPERATURE", str(_d.brain_temperature))),
-        bouncer_temperature=float(os.getenv("BOUNCER_TEMPERATURE", str(_d.bouncer_temperature))),
-        tagger_temperature=float(os.getenv("TAGGER_TEMPERATURE", str(_d.tagger_temperature))),
-        summarizer_temperature=float(os.getenv("SUMMARIZER_TEMPERATURE", str(_d.summarizer_temperature))),
-        vision_temperature=float(os.getenv("VISION_TEMPERATURE", str(_d.vision_temperature))),
-        vision_router_temperature=float(os.getenv("VISION_ROUTER_TEMPERATURE", str(_d.vision_router_temperature))),
-        brain_num_predict=int(os.getenv("BRAIN_NUM_PREDICT", str(_d.brain_num_predict))),
-        voice_brain_num_predict=int(os.getenv("VOICE_BRAIN_NUM_PREDICT", str(_d.voice_brain_num_predict))),
-        brain_num_ctx=int(os.getenv("BRAIN_NUM_CTX", str(_d.brain_num_ctx))),
-        bouncer_num_ctx=int(os.getenv("BOUNCER_NUM_CTX", str(_d.bouncer_num_ctx))),
-        tagger_num_ctx=int(os.getenv("TAGGER_NUM_CTX", str(_d.tagger_num_ctx))),
-        summarizer_num_ctx=int(os.getenv("SUMMARIZER_NUM_CTX", str(_d.summarizer_num_ctx))),
-        vision_num_ctx=int(os.getenv("VISION_NUM_CTX", str(_d.vision_num_ctx))),
-        vision_num_predict=int(os.getenv("VISION_NUM_PREDICT", str(_d.vision_num_predict))),
-        vision_router_num_ctx=int(os.getenv("VISION_ROUTER_NUM_CTX", str(_d.vision_router_num_ctx))),
-        vision_router_num_predict=int(os.getenv("VISION_ROUTER_NUM_PREDICT", str(_d.vision_router_num_predict))),
-        prewarm_num_ctx=int(os.getenv("PREWARM_NUM_CTX", str(_d.bouncer_num_ctx))),
-        keep_alive=os.getenv("OLLAMA_KEEP_ALIVE", _d.keep_alive),
-    )
+    return SandyConfig.from_env().llm
 
 
 class OllamaInterface:

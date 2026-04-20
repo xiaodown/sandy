@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 from time import time
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -63,36 +62,24 @@ class VoiceManager:
         self._stt_worker_task: asyncio.Task | None = None
 
         if voice_config is not None:
-            stt_model = voice_config.stt_model
-            stt_device = voice_config.stt_device
-            stt_compute_type = voice_config.stt_compute_type
-            stt_language = voice_config.stt_language
-            tts_url = voice_config.tts_service_url
-            tts_timeout = voice_config.tts_service_timeout_seconds
-            tts_instruct = voice_config.tts_instruct
-            tts_language = voice_config.tts_language
+            cfg = voice_config
         else:
-            stt_model = os.getenv("VOICE_STT_MODEL", "base.en")
-            stt_device = os.getenv("VOICE_STT_DEVICE", "cuda")
-            stt_compute_type = os.getenv("VOICE_STT_COMPUTE_TYPE", "float16")
-            stt_language = os.getenv("VOICE_STT_LANGUAGE", "en").strip() or None
-            tts_url = os.getenv("VOICE_TTS_SERVICE_URL", "http://127.0.0.1:8777")
-            tts_timeout = float(os.getenv("VOICE_TTS_SERVICE_TIMEOUT_SECONDS", "180"))
-            tts_instruct = os.getenv("VOICE_TTS_INSTRUCT") or None
-            tts_language = os.getenv("VOICE_TTS_LANGUAGE") or "English"
+            from ..config import SandyConfig
+
+            cfg = SandyConfig.from_env().voice
 
         self._transcriber = FasterWhisperTranscriber(
-            model_name=stt_model,
-            device=stt_device,
-            compute_type=stt_compute_type,
-            language=stt_language,
+            model_name=cfg.stt_model,
+            device=cfg.stt_device,
+            compute_type=cfg.stt_compute_type,
+            language=cfg.stt_language,
         )
         self._tts = TtsServiceClient(
             TtsServiceConfig(
-                base_url=tts_url,
-                timeout_seconds=tts_timeout,
-                default_instruct=tts_instruct,
-                default_language=tts_language,
+                base_url=cfg.tts_service_url,
+                timeout_seconds=cfg.tts_service_timeout_seconds,
+                default_instruct=cfg.tts_instruct,
+                default_language=cfg.tts_language,
             ),
         )
 
