@@ -103,6 +103,11 @@ class StorageConfig:
     server_db_name: str = "server.db"
     embed_model: str = "mxbai-embed-large"
     vector_max_distance: float = 0.6
+    rag_enabled: bool = True
+    rag_n_results: int = 8
+    rag_max_chars: int = 4000
+    rag_max_doc_chars: int = 800
+    rag_scope: str = "server"
     summarize_threshold: int = 144
 
     @property
@@ -267,6 +272,11 @@ class SandyConfig:
                 server_db_name=_str("SERVER_DB_NAME", _storage.server_db_name),
                 embed_model=_str("EMBED_MODEL", _storage.embed_model),
                 vector_max_distance=_float("VECTOR_MAX_DISTANCE", _storage.vector_max_distance),
+                rag_enabled=_bool_flag("RAG_ENABLED", _storage.rag_enabled),
+                rag_n_results=_int("RAG_N_RESULTS", _storage.rag_n_results),
+                rag_max_chars=_int("RAG_MAX_CHARS", _storage.rag_max_chars),
+                rag_max_doc_chars=_int("RAG_MAX_DOC_CHARS", _storage.rag_max_doc_chars),
+                rag_scope=_str("RAG_SCOPE", _storage.rag_scope).strip().lower() or _storage.rag_scope,
                 summarize_threshold=_int("SUMMARIZE_THRESHOLD", _storage.summarize_threshold),
             ),
             search=SearchConfig(

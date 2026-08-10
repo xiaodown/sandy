@@ -47,6 +47,9 @@ _INT_ENV_VARS: tuple[str, ...] = (
     "TRACE_RETENTION_DAYS",
     "STEAM_BROWSE_CACHE_TTL_SECONDS",
     "SEARXNG_PORT",
+    "RAG_N_RESULTS",
+    "RAG_MAX_CHARS",
+    "RAG_MAX_DOC_CHARS",
 )
 _FLOAT_ENV_VARS: tuple[str, ...] = (
     "BRAIN_TEMPERATURE",
@@ -242,6 +245,40 @@ def validate_startup_config() -> list[CheckResult]:
             ok=False,
             summary="BRAIN_PROVIDER is invalid",
             detail="Supported values: ollama, vllm",
+        ))
+
+    rag_enabled = os.getenv("RAG_ENABLED", "").strip().lower()
+    if not rag_enabled or rag_enabled in {"1", "true", "yes", "0", "false", "no"}:
+        results.append(CheckResult(
+            name="RAG_ENABLED",
+            severity="hard",
+            ok=True,
+            summary="RAG_ENABLED parsed successfully" if rag_enabled else "RAG_ENABLED not set; code defaults will apply",
+        ))
+    else:
+        results.append(CheckResult(
+            name="RAG_ENABLED",
+            severity="hard",
+            ok=False,
+            summary="RAG_ENABLED is invalid",
+            detail="Supported values: true, false, yes, no, 1, 0",
+        ))
+
+    rag_scope = os.getenv("RAG_SCOPE", "server").strip().lower() or "server"
+    if rag_scope in {"server", "channel"}:
+        results.append(CheckResult(
+            name="RAG_SCOPE",
+            severity="hard",
+            ok=True,
+            summary=f"RAG_SCOPE={rag_scope}",
+        ))
+    else:
+        results.append(CheckResult(
+            name="RAG_SCOPE",
+            severity="hard",
+            ok=False,
+            summary="RAG_SCOPE is invalid",
+            detail="Supported values: server, channel",
         ))
 
     return results

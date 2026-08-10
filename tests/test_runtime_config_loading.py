@@ -18,6 +18,12 @@ def test_sandy_config_from_env_reads_current_environment(monkeypatch) -> None:
     monkeypatch.setenv("BRAIN_REQUEST_TIMEOUT_SECONDS", "77")
     monkeypatch.setenv("BRAIN_REASONING_EFFORT", "none")
     monkeypatch.setenv("VISION_MODEL", "vision-from-env")
+    monkeypatch.setenv("VECTOR_MAX_DISTANCE", "0.72")
+    monkeypatch.setenv("RAG_ENABLED", "false")
+    monkeypatch.setenv("RAG_N_RESULTS", "12")
+    monkeypatch.setenv("RAG_MAX_CHARS", "6000")
+    monkeypatch.setenv("RAG_MAX_DOC_CHARS", "1000")
+    monkeypatch.setenv("RAG_SCOPE", "channel")
 
     cfg = SandyConfig.from_env()
 
@@ -28,6 +34,12 @@ def test_sandy_config_from_env_reads_current_environment(monkeypatch) -> None:
     assert cfg.llm.brain_request_timeout_seconds == 77.0
     assert cfg.llm.brain_reasoning_effort == "none"
     assert cfg.llm.vision_model == "vision-from-env"
+    assert cfg.storage.vector_max_distance == 0.72
+    assert cfg.storage.rag_enabled is False
+    assert cfg.storage.rag_n_results == 12
+    assert cfg.storage.rag_max_chars == 6000
+    assert cfg.storage.rag_max_doc_chars == 1000
+    assert cfg.storage.rag_scope == "channel"
 
 
 def test_default_llm_config_reads_current_environment(monkeypatch) -> None:

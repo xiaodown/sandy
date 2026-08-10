@@ -510,6 +510,7 @@ class MemoryClient:
             author_name=message.author.display_name,
             server_id=message.guild.id,
             timestamp=message.created_at,
+            channel_id=message.channel.id,
         )
         if stored:
             logger.info(

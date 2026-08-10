@@ -461,10 +461,16 @@ async def test_attachment_reply_path_uses_detailed_caption_for_rag_and_memory(bo
         "[friend pasted an image into the chat]\n"
         "[Image: a cat sleeping on a couch with its paws tucked under its body]"
     )
+    rag_config = bot_module.pipeline.rag_config
     vector_memory.query.assert_awaited_once_with(
         "[friend pasted an image into the chat]\n"
         "[Image: a cat sleeping on a couch with its paws tucked under its body]",
         server_id=message.guild.id,
+        channel_id=message.channel.id,
+        n_results=rag_config.n_results,
+        scope=rag_config.scope,
+        max_chars=rag_config.max_chars,
+        max_doc_chars=rag_config.max_doc_chars,
     )
     assert memory_worker.calls == [(message, detail_descriptions)]
 

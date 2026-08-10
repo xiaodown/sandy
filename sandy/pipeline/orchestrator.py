@@ -34,7 +34,7 @@ from .bouncer import build_bouncer_context, run_bouncer
 from .brain import finalize_reply, run_brain
 from .memory_worker import MemoryWorker
 from .reply import send_reply
-from .retrieval import run_retrieval
+from .retrieval import RagConfig, run_retrieval
 from .tool_dispatch import run_tool_dispatch
 from .tracing import trace_event as _default_trace_event, forensic_event
 
@@ -57,6 +57,7 @@ class SandyPipeline:
         memory_worker: MemoryWorker,
         runtime_state: RuntimeState,
         voice: VoiceManager,
+        rag_config: RagConfig | None = None,
         tools_module=tools_module_default,
         trace_event=_default_trace_event,
     ) -> None:
@@ -70,6 +71,7 @@ class SandyPipeline:
         self.memory_worker = memory_worker
         self.runtime_state = runtime_state
         self.voice = voice
+        self.rag_config = rag_config or RagConfig()
         self.tools_module = tools_module
         self.trace_event = trace_event
         self._cache_seeded = False
@@ -344,8 +346,10 @@ class SandyPipeline:
                         self.vector_memory,
                         rag_query_text=rag_query_text,
                         server_id=message.guild.id,
+                        channel_id=message.channel.id,
                         ollama_history=ollama_history,
                         recommended_tool=bouncer_result.recommended_tool,
+                        rag_config=self.rag_config,
                         trace=trace,
                         runtime_state=self.runtime_state,
                     )

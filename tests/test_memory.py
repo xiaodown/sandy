@@ -66,6 +66,7 @@ async def test_process_and_store_tags_summarizes_and_embeds_image_context():
         author_name=message.author.display_name,
         server_id=message.guild.id,
         timestamp=message.created_at,
+        channel_id=message.channel.id,
     )
 
 
@@ -172,6 +173,7 @@ async def test_process_and_store_keeps_recall_and_vector_calls_server_scoped():
         author_name=message.author.display_name,
         server_id=777,
         timestamp=message.created_at,
+        channel_id=888,
     )
 
 
@@ -197,6 +199,7 @@ async def test_process_and_store_continues_without_tags_if_tagger_fails():
         author_name=message.author.display_name,
         server_id=message.guild.id,
         timestamp=message.created_at,
+        channel_id=message.channel.id,
     )
 
 
@@ -223,6 +226,7 @@ async def test_process_and_store_continues_without_summary_if_summarizer_fails()
         author_name=message.author.display_name,
         server_id=message.guild.id,
         timestamp=message.created_at,
+        channel_id=message.channel.id,
     )
 
 
@@ -281,6 +285,7 @@ async def test_process_and_store_formats_multiple_images_for_recall_and_vector()
         author_name=message.author.display_name,
         server_id=message.guild.id,
         timestamp=message.created_at,
+        channel_id=message.channel.id,
     )
 
 
@@ -356,6 +361,7 @@ async def test_drain_deferred_messages_stores_recall_and_vector_then_deletes_que
         author_name="alice",
         server_id=3,
         timestamp=queued_row.timestamp,
+        channel_id=2,
     )
 
 
@@ -505,11 +511,51 @@ async def test_vector_query_passes_server_filter_to_chroma():
         },
     )
 
-    result = await VectorMemory.query(vector_memory, "secret topic", server_id=4242, n_results=5)
+    result = await VectorMemory.query(
+        vector_memory,
+        "secret topic",
+        server_id=4242,
+        channel_id=999,
+        n_results=5,
+        scope="channel",
+    )
 
     assert "<friend>: private message" in result
-    assert recorded["where"] == {"server_id": 4242}
+    assert recorded["where"] == {"$and": [{"server_id": 4242}, {"channel_id": 999}]}
     assert recorded["n_results"] == 3
+
+
+@pytest.mark.asyncio
+async def test_vector_query_applies_doc_and_total_char_caps():
+    vector_memory = VectorMemory.__new__(VectorMemory)
+    vector_memory._embed_model = "mxbai-embed-large"
+    vector_memory._max_distance = 0.6
+    vector_memory._embed_client = SimpleNamespace(
+        embed=AsyncMock(return_value=SimpleNamespace(embeddings=[[0.1, 0.2, 0.3]]))
+    )
+    vector_memory._collection = SimpleNamespace(
+        count=lambda: 2,
+        query=lambda **_kwargs: {
+            "documents": [["x" * 100, "second message"]],
+            "metadatas": [[
+                {"author_name": "friend", "timestamp": "2026-03-13T12:00:00+00:00"},
+                {"author_name": "friend", "timestamp": "2026-03-13T12:01:00+00:00"},
+            ]],
+            "distances": [[0.2, 0.2]],
+        },
+    )
+
+    result = await VectorMemory.query(
+        vector_memory,
+        "secret topic",
+        server_id=4242,
+        n_results=2,
+        max_doc_chars=20,
+        max_chars=90,
+    )
+
+    assert "xxxxxxxxxxxxxxxxxxxx..." in result
+    assert len(result) <= 90
 
 
 @pytest.mark.asyncio

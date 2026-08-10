@@ -27,6 +27,7 @@ from .. import tools
 from .attachments import AttachmentProcessingResult
 from .memory_worker import MemoryWorker
 from .orchestrator import SandyPipeline
+from .retrieval import RagConfig
 from .tracing import trace_event as _default_trace_event
 
 if TYPE_CHECKING:
@@ -55,6 +56,17 @@ def build_pipeline(
             db_dir=config.storage.db_dir,
             embed_model=config.storage.embed_model,
             max_distance=config.storage.vector_max_distance,
+            rag_n_results=config.storage.rag_n_results,
+            rag_max_chars=config.storage.rag_max_chars,
+            rag_max_doc_chars=config.storage.rag_max_doc_chars,
+            rag_scope=config.storage.rag_scope,
+        )
+        rag_config = RagConfig(
+            enabled=config.storage.rag_enabled,
+            n_results=config.storage.rag_n_results,
+            max_chars=config.storage.rag_max_chars,
+            max_doc_chars=config.storage.rag_max_doc_chars,
+            scope=config.storage.rag_scope,
         )
         recall_db = ChatDatabase(str(config.storage.recall_db_path))
         recall_db.init_db()
@@ -113,6 +125,16 @@ def build_pipeline(
             vector_memory=vector_memory,
             background_tasks=background_tasks,
         )
+        from ..config import SandyConfig
+
+        legacy_storage = SandyConfig.from_env().storage
+        rag_config = RagConfig(
+            enabled=legacy_storage.rag_enabled,
+            n_results=legacy_storage.rag_n_results,
+            max_chars=legacy_storage.rag_max_chars,
+            max_doc_chars=legacy_storage.rag_max_doc_chars,
+            scope=legacy_storage.rag_scope,
+        )
 
     cache = Last10(maxlen=10, registry=registry)
     memory_worker = MemoryWorker(memory.process_and_store, runtime_state=runtime_state)
@@ -128,6 +150,7 @@ def build_pipeline(
         memory_worker=memory_worker,
         runtime_state=runtime_state,
         voice=voice,
+        rag_config=rag_config,
         tools_module=tools,
         trace_event=trace_event,
     )

@@ -70,8 +70,20 @@ class VectorMemory:
         db_dir: str | None = None,
         embed_model: str | None = None,
         max_distance: float | None = None,
+        rag_n_results: int | None = None,
+        rag_max_chars: int | None = None,
+        rag_max_doc_chars: int | None = None,
+        rag_scope: str | None = None,
     ) -> None:
-        if db_dir is None or embed_model is None or max_distance is None:
+        if (
+            db_dir is None
+            or embed_model is None
+            or max_distance is None
+            or rag_n_results is None
+            or rag_max_chars is None
+            or rag_max_doc_chars is None
+            or rag_scope is None
+        ):
             from .config import SandyConfig
 
             storage_cfg = SandyConfig.from_env().storage
@@ -81,6 +93,14 @@ class VectorMemory:
                 embed_model = storage_cfg.embed_model
             if max_distance is None:
                 max_distance = storage_cfg.vector_max_distance
+            if rag_n_results is None:
+                rag_n_results = storage_cfg.rag_n_results
+            if rag_max_chars is None:
+                rag_max_chars = storage_cfg.rag_max_chars
+            if rag_max_doc_chars is None:
+                rag_max_doc_chars = storage_cfg.rag_max_doc_chars
+            if rag_scope is None:
+                rag_scope = storage_cfg.rag_scope
 
         _db_dir = resolve_runtime_path(db_dir)
         chroma_path = _db_dir / "chroma"
@@ -96,6 +116,10 @@ class VectorMemory:
         )
         self._embed_model = embed_model
         self._max_distance = max_distance
+        self._rag_n_results = rag_n_results
+        self._rag_max_chars = rag_max_chars
+        self._rag_max_doc_chars = rag_max_doc_chars
+        self._rag_scope = rag_scope
         self._embed_client = ollama.AsyncClient()
         logger.info(
             "VectorMemory ready (path=%r, collection=%r, docs=%d)",
@@ -113,6 +137,7 @@ class VectorMemory:
         author_name: str,
         server_id: int,
         timestamp: datetime,
+        channel_id: int | None = None,
     ) -> bool:
         """Embed and upsert one message into the vector store.
 
@@ -121,6 +146,7 @@ class VectorMemory:
         author_name — display name at time of storage
         server_id   — Discord guild ID; stored in metadata for isolation filtering
         timestamp   — message creation time (tz-aware UTC preferred)
+        channel_id  — optional Discord channel ID for channel-scoped retrieval
         """
         if not content or not content.strip():
             return False
@@ -130,15 +156,18 @@ class VectorMemory:
         resp = await self._embed_client.embed(model=self._embed_model, input=content)
         embedding = resp.embeddings[0]
         ts_str = timestamp.isoformat() if timestamp else ""
+        metadata = {
+            "author_name": author_name,
+            "server_id":   server_id,
+            "timestamp":   ts_str,
+        }
+        if channel_id is not None:
+            metadata["channel_id"] = channel_id
         self._collection.upsert(
             ids=[message_id],
             embeddings=[embedding],
             documents=[content],
-            metadatas=[{
-                "author_name": author_name,
-                "server_id":   server_id,
-                "timestamp":   ts_str,
-            }],
+            metadatas=[metadata],
         )
         logger.debug(
             "VectorMemory.add_message stored id=%s server=%d author=%r",
@@ -154,13 +183,21 @@ class VectorMemory:
         self,
         text: str,
         server_id: int,
-        n_results: int = 8,
+        n_results: int | None = None,
+        channel_id: int | None = None,
+        scope: str | None = None,
+        max_chars: int | None = None,
+        max_doc_chars: int | None = None,
     ) -> str:
         """Return a formatted block of semantically similar past messages.
 
         text      — query text (typically the most recent user message)
         server_id — only messages from this guild are returned
         n_results — maximum number of results to include
+        channel_id — channel to filter to when scope="channel"
+        scope — "server" or "channel"; server scope is the default
+        max_chars — maximum size of the returned formatted block
+        max_doc_chars — maximum characters from any single stored document
 
         Returns a newline-joined block ready for injection into a system
         prompt, or an empty string if nothing relevant is found or on error.
@@ -168,6 +205,16 @@ class VectorMemory:
         if not text or not text.strip():
             return ""
         try:
+            if n_results is None:
+                n_results = getattr(self, "_rag_n_results", 8)
+            if scope is None:
+                scope = getattr(self, "_rag_scope", "server")
+            if scope not in {"server", "channel"}:
+                scope = "server"
+            if max_chars is None:
+                max_chars = getattr(self, "_rag_max_chars", 4000)
+            if max_doc_chars is None:
+                max_doc_chars = getattr(self, "_rag_max_doc_chars", 800)
             total = self._collection.count()
             if total == 0:
                 return ""
@@ -176,10 +223,13 @@ class VectorMemory:
             n = min(n_results, total)
             resp = await self._embed_client.embed(model=self._embed_model, input=text)
             embedding = resp.embeddings[0]
+            where: dict = {"server_id": server_id}
+            if scope == "channel" and channel_id is not None:
+                where = {"$and": [{"server_id": server_id}, {"channel_id": channel_id}]}
             results = self._collection.query(
                 query_embeddings=[embedding],
                 n_results=n,
-                where={"server_id": server_id},
+                where=where,
                 include=["documents", "metadatas", "distances"],
             )
             docs      = results.get("documents",  [[]])[0]
@@ -199,7 +249,19 @@ class VectorMemory:
                     ts = dt.astimezone(_PACIFIC).strftime("%Y-%m-%d %H:%M %Z")
                 except Exception:
                     ts = ts_raw or "?"
-                lines.append(f"[{ts}] <{author}>: {doc}")
+                doc_text = str(doc)
+                if max_doc_chars is not None and max_doc_chars > 0 and len(doc_text) > max_doc_chars:
+                    doc_text = doc_text[:max_doc_chars].rstrip() + "..."
+                line = f"[{ts}] <{author}>: {doc_text}"
+                if max_chars is not None and max_chars > 0:
+                    current_chars = sum(len(existing) for existing in lines) + max(0, len(lines) - 1)
+                    separator_chars = 1 if lines else 0
+                    if current_chars + separator_chars + len(line) > max_chars:
+                        remaining = max_chars - current_chars - separator_chars
+                        if remaining >= 80:
+                            lines.append(line[: max(0, remaining - 3)].rstrip() + "...")
+                        break
+                lines.append(line)
 
             if lines:
                 logger.debug("VectorMemory.query → %d result(s) for server %d", len(lines), server_id)
