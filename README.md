@@ -90,7 +90,9 @@ The `.env` is well-commented and broken into sections. The important bits:
 - `DISCORD_API_KEY` — your bot token (see [Creating a Discord bot](#creating-a-discord-bot) below)
 - `DB_DIR` — production database directory
 - `TEST_DB_DIR` — database directory used automatically by `python -m sandy --test`
-- `BRAIN_MODEL`, `BOUNCER_MODEL`, etc. — ollama model tags. Roles can share a model, but splitting them is often better once VRAM behavior is understood.
+- `BRAIN_MODEL`, `BOUNCER_MODEL`, etc. — model names for each LLM role. By default all roles use Ollama tags.
+- `BRAIN_PROVIDER` — set to `ollama` for the original all-Ollama path, or `vllm` to send only the main brain to an OpenAI-compatible vLLM server.
+- `BRAIN_BASE_URL` / `BRAIN_API_KEY` — vLLM OpenAI-compatible endpoint settings when `BRAIN_PROVIDER=vllm`.
 - `VISION_ROUTER_MODEL` — optional tiny multimodal model for cheap pre-bouncer image captions
 - `EMBED_MODEL` — embedding model for ChromaDB (default: `mxbai-embed-large`)
 - `OLLAMA_KEEP_ALIVE` — how long ollama keeps a model in VRAM after the last request. `1h` is a better default when Sandy is the main local GPU workload; lowering it mainly buys back VRAM, not necessarily lower idle power.
@@ -108,6 +110,29 @@ ollama pull mxbai-embed-large
 ```
 
 Ollama *might* auto-pull on first use, but don't count on it. Pull explicitly.
+
+If the brain is served by vLLM, keep vLLM in its own local virtualenv:
+
+```bash
+uv venv vllm_service/.venv --python 3.12
+uv pip install --python vllm_service/.venv/bin/python 'vllm==0.26.0' --torch-backend cu130
+```
+
+Then start the brain endpoint before Sandy:
+
+```bash
+vllm_service/run.sh
+```
+
+That foreground command is screen/tmux-friendly: `Ctrl-C` stops vLLM cleanly. For a detached local process, use:
+
+```bash
+vllm_service/start.sh
+vllm_service/status.sh
+vllm_service/stop.sh
+```
+
+The service scripts default to `mistralai/Mistral-Small-4-119B-2603-NVFP4` with a 16k context window on the local Blackwell GPU UUID, serve `http://127.0.0.1:8000/v1`, and disable the flashinfer sampler so vLLM does not require a system CUDA toolkit for sampler JIT. Override `VLLM_BRAIN_MODEL`, `VLLM_BRAIN_MAX_MODEL_LEN`, or `VLLM_BRAIN_CUDA_VISIBLE_DEVICES` if this machine layout changes.
 
 ### 4. Start SearXNG (web search)
 

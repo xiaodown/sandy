@@ -11,12 +11,22 @@ from sandy.voice.manager import VoiceManager
 
 
 def test_sandy_config_from_env_reads_current_environment(monkeypatch) -> None:
+    monkeypatch.setenv("BRAIN_PROVIDER", "vllm")
+    monkeypatch.setenv("BRAIN_BASE_URL", "http://brain.test:8000/v1/")
+    monkeypatch.setenv("BRAIN_API_KEY", "test-key")
     monkeypatch.setenv("BRAIN_MODEL", "brain-from-env")
+    monkeypatch.setenv("BRAIN_REQUEST_TIMEOUT_SECONDS", "77")
+    monkeypatch.setenv("BRAIN_REASONING_EFFORT", "none")
     monkeypatch.setenv("VISION_MODEL", "vision-from-env")
 
     cfg = SandyConfig.from_env()
 
+    assert cfg.llm.brain_provider == "vllm"
+    assert cfg.llm.brain_base_url == "http://brain.test:8000/v1"
+    assert cfg.llm.brain_api_key == "test-key"
     assert cfg.llm.brain_model == "brain-from-env"
+    assert cfg.llm.brain_request_timeout_seconds == 77.0
+    assert cfg.llm.brain_reasoning_effort == "none"
     assert cfg.llm.vision_model == "vision-from-env"
 
 

@@ -53,6 +53,7 @@ _FLOAT_ENV_VARS: tuple[str, ...] = (
     "BOUNCER_TEMPERATURE",
     "TAGGER_TEMPERATURE",
     "SUMMARIZER_TEMPERATURE",
+    "BRAIN_REQUEST_TIMEOUT_SECONDS",
     "VECTOR_MAX_DISTANCE",
 )
 
@@ -113,10 +114,18 @@ def _recall_db_path(db_dir: Path) -> Path:
 
 def _configured_model_names() -> list[str]:
     models: list[str] = []
+    brain_provider = os.getenv("BRAIN_PROVIDER", "ollama").strip().lower()
+    brain_model = os.getenv("BRAIN_MODEL", _MODEL_DEFAULTS["BRAIN_MODEL"]).strip()
     for env_name, default in _MODEL_DEFAULTS.items():
+        if env_name == "BRAIN_MODEL" and brain_provider == "vllm":
+            continue
         value = os.getenv(env_name, default).strip()
         if env_name == "VISION_MODEL" and not value:
-            value = os.getenv("BRAIN_MODEL", _MODEL_DEFAULTS["BRAIN_MODEL"]).strip()
+            if brain_provider == "vllm":
+                continue
+            value = brain_model
+        if env_name == "PREWARM_MODEL_NAME" and brain_provider == "vllm" and value == brain_model:
+            continue
         if not value:
             continue
         if value not in models:
@@ -217,6 +226,23 @@ def validate_startup_config() -> list[CheckResult]:
         results.append(_check_env_cast(env_name, int))
     for env_name in _FLOAT_ENV_VARS:
         results.append(_check_env_cast(env_name, float))
+
+    brain_provider = os.getenv("BRAIN_PROVIDER", "ollama").strip().lower() or "ollama"
+    if brain_provider in {"ollama", "vllm"}:
+        results.append(CheckResult(
+            name="BRAIN_PROVIDER",
+            severity="hard",
+            ok=True,
+            summary=f"BRAIN_PROVIDER={brain_provider}",
+        ))
+    else:
+        results.append(CheckResult(
+            name="BRAIN_PROVIDER",
+            severity="hard",
+            ok=False,
+            summary="BRAIN_PROVIDER is invalid",
+            detail="Supported values: ollama, vllm",
+        ))
 
     return results
 
@@ -326,6 +352,62 @@ async def check_ollama() -> list[CheckResult]:
     return results
 
 
+async def check_brain_provider() -> CheckResult:
+    provider = os.getenv("BRAIN_PROVIDER", "ollama").strip().lower() or "ollama"
+    if provider == "ollama":
+        return CheckResult(
+            name="brain_provider",
+            severity="soft",
+            ok=True,
+            summary="Brain provider is Ollama",
+        )
+    if provider != "vllm":
+        return CheckResult(
+            name="brain_provider",
+            severity="soft",
+            ok=False,
+            summary=f"Unknown brain provider: {provider}",
+        )
+
+    base_url = os.getenv("BRAIN_BASE_URL", "http://127.0.0.1:8000/v1").rstrip("/")
+    api_key = os.getenv("BRAIN_API_KEY", "EMPTY")
+    model = os.getenv("BRAIN_MODEL", "").strip()
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{base_url}/models", headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        return CheckResult(
+            name="brain_provider",
+            severity="soft",
+            ok=False,
+            summary=f"vLLM brain endpoint is unreachable at {base_url}",
+            detail=str(exc),
+        )
+
+    model_ids = {
+        item.get("id")
+        for item in payload.get("data", [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    if model and model_ids and model not in model_ids:
+        return CheckResult(
+            name="brain_provider",
+            severity="soft",
+            ok=False,
+            summary="vLLM brain endpoint is reachable but model is not listed",
+            detail=f"configured={model} available={', '.join(sorted(model_ids))}",
+        )
+    return CheckResult(
+        name="brain_provider",
+        severity="soft",
+        ok=True,
+        summary=f"vLLM brain endpoint reachable at {base_url}",
+    )
+
+
 async def check_searxng() -> CheckResult:
     host = os.getenv("SEARXNG_HOST", "127.0.0.1")
     port = os.getenv("SEARXNG_PORT", "8888")
@@ -387,6 +469,7 @@ async def collect_health_report(*, test_mode: bool) -> HealthReport:
         *validate_local_state(test_mode=test_mode),
     ]
     checks.extend(await check_ollama())
+    checks.append(await check_brain_provider())
     checks.append(await check_vector_memory(test_mode=test_mode))
     checks.append(await check_searxng())
     return HealthReport(checks=checks)

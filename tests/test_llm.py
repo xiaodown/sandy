@@ -1,9 +1,11 @@
 from sandy.llm import (
     BouncerResponse,
+    OllamaInterface,
     _coerce_bouncer_tool_selection,
     _infer_steam_browse_category,
     _looks_like_direct_image_ask,
 )
+from sandy.config import LlmConfig
 
 
 def test_infer_steam_category_prefers_explicit_latest_message():
@@ -111,3 +113,73 @@ def test_coerce_bouncer_no_respond_to_true_for_direct_image_ask():
 
     assert coerced.should_respond is True
     assert "attached image or picture" in coerced.reason
+
+
+async def test_ask_brain_can_use_vllm_chat_completions(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "choices": [
+                    {
+                        "message": {"content": "vllm sandy reply"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            captured["timeout"] = kwargs.get("timeout")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, *, json, headers):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr("sandy.llm.httpx.AsyncClient", FakeAsyncClient)
+
+    llm = OllamaInterface(
+        LlmConfig(
+            brain_provider="vllm",
+            brain_base_url="http://brain.test/v1",
+            brain_api_key="secret-ish",
+            brain_model="mistral-brain",
+            brain_temperature=0.42,
+            brain_num_predict=123,
+            brain_num_ctx=4096,
+            brain_reasoning_effort="none",
+        )
+    )
+
+    response = await llm.ask_brain(
+        [{"role": "user", "content": "hey sandy"}],
+        server_name="test server",
+        channel_name="bot-lab",
+    )
+
+    assert response is not None
+    assert response.content == "vllm sandy reply"
+    assert response.done_reason == "stop"
+    assert response.eval_count is None
+    assert captured["url"] == "http://brain.test/v1/chat/completions"
+    payload = captured["json"]
+    assert payload["model"] == "mistral-brain"
+    assert payload["temperature"] == 0.42
+    assert payload["max_tokens"] == 123
+    assert payload["reasoning_effort"] == "none"
+    assert payload["stream"] is False
+    assert payload["messages"][0]["role"] == "system"
+    assert payload["messages"][1] == {"role": "user", "content": "hey sandy"}
+    assert captured["headers"]["Authorization"] == "Bearer secret-ish"

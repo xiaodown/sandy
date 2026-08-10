@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+import httpx
 import ollama
 
 from ..prompt import SandyPrompt
@@ -154,6 +155,8 @@ class OllamaInterface:
 
     async def warm_model(self, model_name: str) -> bool:
         """Send a minimal generate request so ollama loads the model."""
+        if self._cfg.brain_provider == "vllm" and model_name == self._cfg.brain_model:
+            return await self._warm_vllm_brain()
         try:
             async with self._lock:
                 await self._client.generate(
@@ -168,6 +171,20 @@ class OllamaInterface:
             return True
         except Exception as e:
             logger.error("Error occured when warming %s: %s", model_name, e)
+            return False
+
+    async def _warm_vllm_brain(self) -> bool:
+        """Send a tiny request to the configured OpenAI-compatible brain backend."""
+        try:
+            await self._chat_vllm_brain(
+                [{"role": "user", "content": "ping"}],
+                temperature=0.0,
+                max_tokens=1,
+            )
+            logger.info("Requested vLLM brain warmup for model %s", self._cfg.brain_model)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to warm vLLM brain model %s: %s", self._cfg.brain_model, exc)
             return False
 
     # ------------------------------------------------------------------
@@ -403,6 +420,45 @@ class OllamaInterface:
             + messages
         )
         try:
+            if self._cfg.brain_provider == "vllm":
+                raw_content, done_reason = await self._chat_vllm_brain(
+                    full_messages,
+                    temperature=self._cfg.brain_temperature,
+                    max_tokens=num_predict,
+                )
+                brain_response = BrainResponse(
+                    content=raw_content,
+                    done_reason=done_reason,
+                    eval_count=None,
+                )
+                if trace is not None:
+                    emit_forensic_record(
+                        logger,
+                        "FORENSIC brain_generation",
+                        forensic_payload(
+                            trace,
+                            "brain_generation",
+                            model=self._cfg.brain_model,
+                            provider=self._cfg.brain_provider,
+                            prompt_system=prompt.system,
+                            prompt_user=prompt.user,
+                            system_content=system_content,
+                            conversation_messages=messages,
+                            rag_context=rag_context,
+                            tool_context=tool_context,
+                            mode=mode,
+                            participant_names=participant_names,
+                            options={
+                                "temperature": self._cfg.brain_temperature,
+                                "max_tokens": num_predict,
+                            },
+                            raw_response=brain_response.content,
+                            done_reason=brain_response.done_reason,
+                            eval_count=brain_response.eval_count,
+                        ),
+                    )
+                return brain_response
+
             async with self._lock:
                 response = await self._client.chat(
                     model=self._cfg.brain_model,
@@ -449,3 +505,45 @@ class OllamaInterface:
         except Exception as exc:
             logger.error("Brain error: %s", exc)
             return None
+
+    async def _chat_vllm_brain(
+        self,
+        messages: list[dict],
+        *,
+        temperature: float,
+        max_tokens: int,
+    ) -> tuple[str, str | None]:
+        """Call an OpenAI-compatible vLLM chat-completions endpoint."""
+        payload: dict = {
+            "model": self._cfg.brain_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+        if self._cfg.brain_reasoning_effort:
+            payload["reasoning_effort"] = self._cfg.brain_reasoning_effort
+
+        headers = {
+            "Authorization": f"Bearer {self._cfg.brain_api_key}",
+            "Content-Type": "application/json",
+        }
+        timeout = httpx.Timeout(self._cfg.brain_request_timeout_seconds)
+        async with self._lock:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    f"{self._cfg.brain_base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                data = response.json()
+
+        choices = data.get("choices") or []
+        if not choices:
+            raise RuntimeError("vLLM response contained no choices")
+        choice = choices[0]
+        message = choice.get("message") or {}
+        content = message.get("content") or ""
+        finish_reason = choice.get("finish_reason")
+        return content, finish_reason

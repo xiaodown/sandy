@@ -158,8 +158,11 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
 .envrc
 .venv
+.venv-*/
+vllm_service/vllm-brain.pid
 env/
 venv/
 ENV/

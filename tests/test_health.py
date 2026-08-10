@@ -94,6 +94,68 @@ async def test_check_ollama_treats_bare_name_and_latest_tag_as_equivalent(monkey
 
 
 @pytest.mark.asyncio
+async def test_check_ollama_skips_brain_model_when_brain_provider_is_vllm(monkeypatch):
+    fake_response = {
+        "models": [
+            {"name": "bouncer-model"},
+            {"name": "mxbai-embed-large"},
+        ]
+    }
+    fake_client = SimpleNamespace(list=AsyncMock(return_value=fake_response))
+    monkeypatch.setattr(health.ollama, "AsyncClient", lambda: fake_client)
+    monkeypatch.setenv("BRAIN_PROVIDER", "vllm")
+    monkeypatch.setenv("BRAIN_MODEL", "vllm-brain-model")
+    monkeypatch.setenv("BOUNCER_MODEL", "bouncer-model")
+    monkeypatch.setenv("TAGGER_MODEL", "bouncer-model")
+    monkeypatch.setenv("SUMMARIZER_MODEL", "bouncer-model")
+    monkeypatch.setenv("VISION_MODEL", "")
+    monkeypatch.setenv("EMBED_MODEL", "mxbai-embed-large")
+    monkeypatch.setenv("PREWARM_MODEL_NAME", "vllm-brain-model")
+
+    results = await health.check_ollama()
+    by_name = {result.name: result for result in results}
+
+    assert by_name["ollama"].ok is True
+    assert by_name["ollama_models"].ok is True
+
+
+@pytest.mark.asyncio
+async def test_check_brain_provider_reports_vllm_models(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"data": [{"id": "brain-model"}]}
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, *, headers):
+            assert url == "http://brain.test/v1/models"
+            assert headers["Authorization"] == "Bearer EMPTY"
+            return FakeResponse()
+
+    monkeypatch.setattr(health.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setenv("BRAIN_PROVIDER", "vllm")
+    monkeypatch.setenv("BRAIN_BASE_URL", "http://brain.test/v1/")
+    monkeypatch.setenv("BRAIN_MODEL", "brain-model")
+    monkeypatch.setenv("BRAIN_API_KEY", "EMPTY")
+
+    result = await health.check_brain_provider()
+
+    assert result.ok is True
+    assert result.name == "brain_provider"
+
+
+@pytest.mark.asyncio
 async def test_collect_health_report_combines_hard_and_soft_checks(monkeypatch):
     monkeypatch.setattr(
         health,
@@ -109,6 +171,11 @@ async def test_collect_health_report_combines_hard_and_soft_checks(monkeypatch):
         health,
         "check_ollama",
         AsyncMock(return_value=[health.CheckResult("ollama", "soft", False, "down")]),
+    )
+    monkeypatch.setattr(
+        health,
+        "check_brain_provider",
+        AsyncMock(return_value=health.CheckResult("brain_provider", "soft", True, "ok")),
     )
     monkeypatch.setattr(
         health,

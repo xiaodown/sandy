@@ -27,6 +27,9 @@ from .paths import resolve_runtime_path
 class LlmConfig:
     """Model names, temperatures, context sizes, and generation limits."""
 
+    brain_provider: str = "ollama"
+    brain_base_url: str = "http://127.0.0.1:8000/v1"
+    brain_api_key: str = "EMPTY"
     brain_model: str = "qwen2.5:14b"
     bouncer_model: str = "qwen2.5:14b"
     tagger_model: str = "hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q8_0"
@@ -52,6 +55,8 @@ class LlmConfig:
     vision_router_num_ctx: int = 2048
     vision_router_num_predict: int = 48
     prewarm_num_ctx: int | None = None  # defaults to bouncer_num_ctx
+    brain_request_timeout_seconds: float = 180.0
+    brain_reasoning_effort: str | None = None
 
     keep_alive: str = "1h"
 
@@ -203,6 +208,9 @@ class SandyConfig:
 
         return cls(
             llm=LlmConfig(
+                brain_provider=_str("BRAIN_PROVIDER", _llm.brain_provider).strip().lower() or _llm.brain_provider,
+                brain_base_url=_str("BRAIN_BASE_URL", _llm.brain_base_url).rstrip("/") or _llm.brain_base_url,
+                brain_api_key=_str("BRAIN_API_KEY", _llm.brain_api_key),
                 brain_model=_str("BRAIN_MODEL", _llm.brain_model),
                 bouncer_model=_str("BOUNCER_MODEL", _llm.bouncer_model),
                 tagger_model=_str("TAGGER_MODEL", _llm.tagger_model),
@@ -226,6 +234,11 @@ class SandyConfig:
                 vision_router_num_ctx=_int("VISION_ROUTER_NUM_CTX", _llm.vision_router_num_ctx),
                 vision_router_num_predict=_int("VISION_ROUTER_NUM_PREDICT", _llm.vision_router_num_predict),
                 prewarm_num_ctx=_int("PREWARM_NUM_CTX", bouncer_num_ctx),
+                brain_request_timeout_seconds=_float(
+                    "BRAIN_REQUEST_TIMEOUT_SECONDS",
+                    _llm.brain_request_timeout_seconds,
+                ),
+                brain_reasoning_effort=_opt_str("BRAIN_REASONING_EFFORT"),
                 keep_alive=_str("OLLAMA_KEEP_ALIVE", _llm.keep_alive),
             ),
             voice=VoiceConfig(
