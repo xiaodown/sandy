@@ -530,6 +530,7 @@ async def test_vector_query_applies_doc_and_total_char_caps():
     vector_memory = VectorMemory.__new__(VectorMemory)
     vector_memory._embed_model = "mxbai-embed-large"
     vector_memory._max_distance = 0.6
+    vector_memory._recall_db = None
     vector_memory._embed_client = SimpleNamespace(
         embed=AsyncMock(return_value=SimpleNamespace(embeddings=[[0.1, 0.2, 0.3]]))
     )
@@ -556,6 +557,75 @@ async def test_vector_query_applies_doc_and_total_char_caps():
 
     assert "xxxxxxxxxxxxxxxxxxxx..." in result
     assert len(result) <= 90
+
+
+@pytest.mark.asyncio
+async def test_vector_query_uses_recall_summary_when_long_doc_would_be_truncated():
+    vector_memory = VectorMemory.__new__(VectorMemory)
+    vector_memory._embed_model = "mxbai-embed-large"
+    vector_memory._max_distance = 0.6
+    vector_memory._recall_db = SimpleNamespace(
+        get_message_by_discord_id=lambda discord_message_id: SimpleNamespace(
+            summary=f"compact summary for {discord_message_id}"
+        )
+    )
+    vector_memory._embed_client = SimpleNamespace(
+        embed=AsyncMock(return_value=SimpleNamespace(embeddings=[[0.1, 0.2, 0.3]]))
+    )
+    vector_memory._collection = SimpleNamespace(
+        count=lambda: 1,
+        query=lambda **_kwargs: {
+            "ids": [["888"]],
+            "documents": [["x" * 100]],
+            "metadatas": [[{"author_name": "friend", "timestamp": "2026-03-13T12:00:00+00:00"}]],
+            "distances": [[0.2]],
+        },
+    )
+
+    result = await VectorMemory.query(
+        vector_memory,
+        "secret topic",
+        server_id=4242,
+        n_results=1,
+        max_doc_chars=20,
+        max_chars=200,
+    )
+
+    assert "(summary: compact summary for 888)" in result
+    assert "xxxxxxxxxxxxxxxxxxxx..." not in result
+
+
+@pytest.mark.asyncio
+async def test_vector_query_falls_back_to_truncated_doc_when_recall_has_no_summary():
+    vector_memory = VectorMemory.__new__(VectorMemory)
+    vector_memory._embed_model = "mxbai-embed-large"
+    vector_memory._max_distance = 0.6
+    vector_memory._recall_db = SimpleNamespace(
+        get_message_by_discord_id=lambda _discord_message_id: SimpleNamespace(summary=None)
+    )
+    vector_memory._embed_client = SimpleNamespace(
+        embed=AsyncMock(return_value=SimpleNamespace(embeddings=[[0.1, 0.2, 0.3]]))
+    )
+    vector_memory._collection = SimpleNamespace(
+        count=lambda: 1,
+        query=lambda **_kwargs: {
+            "ids": [["888"]],
+            "documents": [["x" * 100]],
+            "metadatas": [[{"author_name": "friend", "timestamp": "2026-03-13T12:00:00+00:00"}]],
+            "distances": [[0.2]],
+        },
+    )
+
+    result = await VectorMemory.query(
+        vector_memory,
+        "secret topic",
+        server_id=4242,
+        n_results=1,
+        max_doc_chars=20,
+        max_chars=200,
+    )
+
+    assert "xxxxxxxxxxxxxxxxxxxx..." in result
 
 
 @pytest.mark.asyncio

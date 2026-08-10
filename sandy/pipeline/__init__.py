@@ -52,6 +52,8 @@ def build_pipeline(
     if config is not None:
         registry = Registry(db_path=str(config.storage.server_db_path))
         llm = OllamaInterface(config=config.llm)
+        recall_db = ChatDatabase(str(config.storage.recall_db_path))
+        recall_db.init_db()
         vector_memory = VectorMemory(
             db_dir=config.storage.db_dir,
             embed_model=config.storage.embed_model,
@@ -60,6 +62,7 @@ def build_pipeline(
             rag_max_chars=config.storage.rag_max_chars,
             rag_max_doc_chars=config.storage.rag_max_doc_chars,
             rag_scope=config.storage.rag_scope,
+            recall_db=recall_db,
         )
         rag_config = RagConfig(
             enabled=config.storage.rag_enabled,
@@ -68,8 +71,6 @@ def build_pipeline(
             max_doc_chars=config.storage.rag_max_doc_chars,
             scope=config.storage.rag_scope,
         )
-        recall_db = ChatDatabase(str(config.storage.recall_db_path))
-        recall_db.init_db()
         tools.init_recall_db(recall_db)
         tools.init_tools_config(
             searxng_base_url=config.search.searxng_base_url,
@@ -106,11 +107,11 @@ def build_pipeline(
         # Legacy path — no config object, read env vars directly.
         registry = Registry()
         llm = OllamaInterface()
-        vector_memory = VectorMemory()
         db_dir = resolve_runtime_path(os.getenv("DB_DIR", "data/prod/"))
         recall_db_name = os.getenv("RECALL_DB_NAME", "recall.db")
         recall_db = ChatDatabase(str(db_dir / recall_db_name))
         recall_db.init_db()
+        vector_memory = VectorMemory(recall_db=recall_db)
         tools.init_recall_db(recall_db)
         tools.init_tools_config(registry=registry)
         memory = MemoryClient(

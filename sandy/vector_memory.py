@@ -74,6 +74,7 @@ class VectorMemory:
         rag_max_chars: int | None = None,
         rag_max_doc_chars: int | None = None,
         rag_scope: str | None = None,
+        recall_db=None,
     ) -> None:
         if (
             db_dir is None
@@ -120,6 +121,7 @@ class VectorMemory:
         self._rag_max_chars = rag_max_chars
         self._rag_max_doc_chars = rag_max_doc_chars
         self._rag_scope = rag_scope
+        self._recall_db = recall_db
         self._embed_client = ollama.AsyncClient()
         logger.info(
             "VectorMemory ready (path=%r, collection=%r, docs=%d)",
@@ -235,9 +237,10 @@ class VectorMemory:
             docs      = results.get("documents",  [[]])[0]
             metas     = results.get("metadatas",  [[]])[0]
             distances = results.get("distances",  [[]])[0]
+            ids       = results.get("ids",        [[]])[0] or [None] * len(docs)
 
             lines = []
-            for doc, meta, dist in zip(docs, metas, distances):
+            for doc_id, doc, meta, dist in zip(ids, docs, metas, distances):
                 if dist > self._max_distance:
                     continue
                 author = meta.get("author_name", "?")
@@ -251,7 +254,11 @@ class VectorMemory:
                     ts = ts_raw or "?"
                 doc_text = str(doc)
                 if max_doc_chars is not None and max_doc_chars > 0 and len(doc_text) > max_doc_chars:
-                    doc_text = doc_text[:max_doc_chars].rstrip() + "..."
+                    summary = self._recall_summary_for_doc_id(doc_id)
+                    if summary:
+                        doc_text = f"(summary: {summary})"
+                    else:
+                        doc_text = doc_text[:max_doc_chars].rstrip() + "..."
                 line = f"[{ts}] <{author}>: {doc_text}"
                 if max_chars is not None and max_chars > 0:
                     current_chars = sum(len(existing) for existing in lines) + max(0, len(lines) - 1)
@@ -274,6 +281,25 @@ class VectorMemory:
         except Exception as exc:
             logger.error("VectorMemory.query failed: %s", exc)
             return ""
+
+    def _recall_summary_for_doc_id(self, doc_id: object) -> str | None:
+        """Return Recall's compact summary for a vector hit, when available."""
+        recall_db = getattr(self, "_recall_db", None)
+        if recall_db is None:
+            return None
+        try:
+            discord_message_id = int(str(doc_id))
+        except (TypeError, ValueError):
+            return None
+        try:
+            row = recall_db.get_message_by_discord_id(discord_message_id)
+        except Exception as exc:
+            logger.warning("Recall summary lookup failed for discord_message_id=%s: %s", doc_id, exc)
+            return None
+        summary = getattr(row, "summary", None) if row is not None else None
+        if not summary:
+            return None
+        return str(summary).strip() or None
 
     def delete_message(self, message_id: str) -> bool:
         """Delete one vector-memory document by its Discord message snowflake."""
