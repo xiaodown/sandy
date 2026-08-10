@@ -6,6 +6,7 @@ from sandy.llm import (
     _looks_like_direct_image_ask,
 )
 from sandy.config import LlmConfig
+from sandy.prompt import SandyPrompt
 
 
 def test_infer_steam_category_prefers_explicit_latest_message():
@@ -92,6 +93,14 @@ def test_looks_like_direct_image_ask_requires_sandy_and_picture_language():
         ]
     )
     assert _looks_like_direct_image_ask(context_other) is False
+
+
+def test_brain_prompt_forbids_stage_directions():
+    prompt = SandyPrompt.brain_prompt()
+
+    assert "Do not describe actions" in prompt.system
+    assert "stage directions" in prompt.system
+    assert "If it would not be spoken or typed" in prompt.system
 
 
 def test_coerce_bouncer_no_respond_to_true_for_direct_image_ask():
