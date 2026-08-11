@@ -9,6 +9,71 @@ from .tracing import trace_event, forensic_event
 
 logger = get_logger("sandy.bot")
 
+_SANDY_PREFIX_RE = re.compile(r"^\s*[*_`~\s]*(?:Sandy|assistant)\s*[>:]\s*", re.IGNORECASE)
+_WRAPPED_SANDY_PREFIX_RE = re.compile(
+    r"^\s*[*_`~]+\s*(?:Sandy|assistant)\s*[>:]\s*(.*?)\s*[*_`~]+\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_STAGE_ACTION_WORDS = (
+    "blink",
+    "blinks",
+    "crack",
+    "cracks",
+    "grin",
+    "grins",
+    "laugh",
+    "laughs",
+    "lean",
+    "leans",
+    "pause",
+    "pauses",
+    "rolls",
+    "shrug",
+    "shrugs",
+    "sigh",
+    "sighs",
+    "smile",
+    "smiles",
+    "snort",
+    "snorts",
+    "stretch",
+    "stretches",
+)
+_STAGE_ACTION_RE = re.compile(rf"\b(?:{'|'.join(_STAGE_ACTION_WORDS)})\b", re.IGNORECASE)
+_LEADING_STAGE_RE = re.compile(r"^\s*(?:[*_]+([^*_]{1,160})[*_]+|\(([^()\n]{1,160})\))\s*")
+_INLINE_STAGE_RE = re.compile(r"\s+(?:[*_]+([^*_]{1,160})[*_]+|\(([^()\n]{1,160})\))\s*")
+
+
+def _strip_stage_directions(reply: str) -> str:
+    """Remove common roleplay/action wrappers while preserving normal chat text."""
+    cleaned = reply.strip()
+
+    wrapped_prefix = _WRAPPED_SANDY_PREFIX_RE.match(cleaned)
+    if wrapped_prefix:
+        cleaned = wrapped_prefix.group(1).strip()
+
+    cleaned = _SANDY_PREFIX_RE.sub("", cleaned).strip()
+
+    while True:
+        match = _LEADING_STAGE_RE.match(cleaned)
+        if not match:
+            break
+        stage_text = (match.group(1) or match.group(2) or "").strip()
+        if not _STAGE_ACTION_RE.search(stage_text):
+            break
+        cleaned = cleaned[match.end():].strip()
+
+    def replace_inline(match: re.Match) -> str:
+        stage_text = (match.group(1) or match.group(2) or "").strip()
+        if _STAGE_ACTION_RE.search(stage_text):
+            return " "
+        return match.group(0)
+
+    cleaned = _INLINE_STAGE_RE.sub(replace_inline, cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
 
 def _trim_to_last_boundary(reply: str) -> str:
     sentence_matches = list(re.finditer(r'[.!?]["\')\]]?(?:\s|$)', reply))
@@ -82,7 +147,7 @@ def finalize_reply(reply: str | None, *, done_reason: str | None = None) -> str 
     if reply is None:
         return None
 
-    cleaned = reply.strip()
+    cleaned = _strip_stage_directions(reply)
     if not cleaned:
         return None
 

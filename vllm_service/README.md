@@ -3,6 +3,10 @@
 This directory contains the local vLLM runtime used when `BRAIN_PROVIDER=vllm`.
 It is intentionally separate from Sandy's main `.venv`, similar to `tts_service/`.
 
+The service exposes its loaded Hugging Face model under the stable OpenAI API
+model name `sandy-brain` by default. Sandy can keep `BRAIN_MODEL=sandy-brain`
+while `VLLM_BRAIN_MODEL` changes during backend model experiments.
+
 ## Setup
 
 ```bash
@@ -38,3 +42,20 @@ GPU-5b44da3f-50e1-6622-bd78-8382819e596d
 ```
 
 Override with `VLLM_BRAIN_CUDA_VISIBLE_DEVICES` if the hardware layout changes.
+
+## Trying Another Brain Model
+
+```bash
+VLLM_BRAIN_MODEL="Qwen/Qwen3-32B" ./run.sh
+```
+
+Sandy can continue to use:
+
+```env
+BRAIN_PROVIDER="vllm"
+BRAIN_BASE_URL="http://127.0.0.1:8000/v1"
+BRAIN_MODEL="sandy-brain"
+```
+
+Override `VLLM_BRAIN_SERVED_MODEL_NAME` only if you intentionally want Sandy to
+send a different model name to the vLLM OpenAI-compatible endpoint.

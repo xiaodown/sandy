@@ -132,7 +132,7 @@ vllm_service/status.sh
 vllm_service/stop.sh
 ```
 
-The service scripts default to `mistralai/Mistral-Small-4-119B-2603-NVFP4` with a 16k context window on the local Blackwell GPU UUID, serve `http://127.0.0.1:8000/v1`, and disable the flashinfer sampler so vLLM does not require a system CUDA toolkit for sampler JIT. Override `VLLM_BRAIN_MODEL`, `VLLM_BRAIN_MAX_MODEL_LEN`, or `VLLM_BRAIN_CUDA_VISIBLE_DEVICES` if this machine layout changes.
+The service scripts default to `mistralai/Mistral-Small-4-119B-2603-NVFP4` with a 16k context window on the local Blackwell GPU UUID, serve `http://127.0.0.1:8000/v1`, expose the stable OpenAI API model name `sandy-brain`, and disable the flashinfer sampler so vLLM does not require a system CUDA toolkit for sampler JIT. Keep Sandy's `BRAIN_MODEL` set to `sandy-brain` and override `VLLM_BRAIN_MODEL`, `VLLM_BRAIN_MAX_MODEL_LEN`, or `VLLM_BRAIN_CUDA_VISIBLE_DEVICES` when testing a different vLLM backend model or hardware layout.
 
 ### 4. Start SearXNG (web search)
 

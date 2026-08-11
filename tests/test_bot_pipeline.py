@@ -176,6 +176,30 @@ def test_finalize_reply_trims_obvious_truncation():
     assert finalized == "This is a complete sentence."
 
 
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ("*grins* oh hell yeah.", "oh hell yeah."),
+        ("*Sandy> hey.*", "hey."),
+        (
+            "yeah alright. *leans back in chair* upgrades gonna make me slower?",
+            "yeah alright. upgrades gonna make me slower?",
+        ),
+        ("Sandy> hey.", "hey."),
+    ],
+)
+def test_finalize_reply_strips_stage_directions_and_speaker_prefixes(reply, expected):
+    from sandy.pipeline.brain import finalize_reply
+
+    assert finalize_reply(reply) == expected
+
+
+def test_finalize_reply_drops_only_stage_direction():
+    from sandy.pipeline.brain import finalize_reply
+
+    assert finalize_reply("*leans back in chair*") is None
+
+
 @pytest.mark.asyncio
 async def test_discord_runtime_state_recovers_after_resume(bot_module, monkeypatch):
     monkeypatch.setattr(
