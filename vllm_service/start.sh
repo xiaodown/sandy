@@ -3,8 +3,27 @@ set -euo pipefail
 
 SERVICE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SERVICE_DIR/.." && pwd)"
+ENV_FILE="${VLLM_BRAIN_ENV_FILE:-$SERVICE_DIR/.env}"
+
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$ENV_FILE"
+  set +a
+fi
+
 PID_FILE="${VLLM_BRAIN_PID_FILE:-$SERVICE_DIR/vllm-brain.pid}"
-LOG_FILE="${VLLM_BRAIN_LOG_FILE:-$ROOT_DIR/data/prod/logs/vllm-brain.log}"
+LOG_FILE="${VLLM_BRAIN_LOG_FILE:-$SERVICE_DIR/logs/vllm-brain.log}"
+
+case "$PID_FILE" in
+  /*) ;;
+  *) PID_FILE="$SERVICE_DIR/$PID_FILE" ;;
+esac
+
+case "$LOG_FILE" in
+  /*) ;;
+  *) LOG_FILE="$SERVICE_DIR/$LOG_FILE" ;;
+esac
 
 if [[ -f "$PID_FILE" ]]; then
   old_pid="$(<"$PID_FILE")"

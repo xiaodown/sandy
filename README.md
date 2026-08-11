@@ -4,7 +4,7 @@
   <img src="docs/images/v2.png" width="256" alt="Sandy" />
 </p>
 
-Sandy is a Discord bot that acts like a person who lives in your server, not a helpful assistant. She has long-term memory, opinions, casual internet-native speech patterns, and no obligation to be useful. She runs entirely on local hardware — no cloud APIs, no OpenAI, no sending your conversations anywhere.
+Sandy is a self-hosted Discord bot designed to behave like a recurring participant in a Discord server, not a utility assistant. She has long-term memory, opinions, casual internet-native speech patterns, and no obligation to be useful. The default deployment is local-first: conversations, model calls, memory, and search stay on infrastructure you control unless you intentionally configure external services.
 
 The name is short for "sandbox." This is a rapid-prototyping playground for local LLM experimentation.
 
@@ -25,7 +25,7 @@ Sandy sees images too. Attachments now go through a two-stage vision path:
 
 That keeps non-reply image posts cheaper while still grounding real image replies properly.
 
-Everything runs locally on a single machine. The LLM inference, the embeddings, the databases, the web search — all of it.
+The reference deployment runs on a single machine: LLM inference, embeddings, databases, and optional web search. The pieces are intentionally plain enough to split out later if your setup needs it.
 
 ## Architecture
 
@@ -61,16 +61,18 @@ Requires voice admin permission, set via `python -m sandy.maintenance set-voice-
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (for venv and package management)
-- [ollama](https://ollama.ai/) (local LLM server)
-- Docker with the compose plugin (for SearXNG web search)
-- A GPU with enough VRAM to run your chosen model. Sandy was developed on a 3090 Ti (24GB). Smaller models exist but YMMV.
+- One local model backend:
+  - [Ollama](https://ollama.ai/) for the original all-local setup
+  - An OpenAI-compatible [vLLM](https://docs.vllm.ai/) server for the main brain model
+- Docker with the compose plugin, if you want local SearXNG web search
+- A GPU is strongly recommended. CPU or very small-model setups may work, but interactive latency depends heavily on the models you choose.
 
 ## Setup
 
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/xiaodown/sandy.git
+git clone <repo-url>
 cd sandy
 uv venv
 source .venv/bin/activate
@@ -90,22 +92,22 @@ The `.env` is well-commented and broken into sections. The important bits:
 - `DISCORD_API_KEY` — your bot token (see [Creating a Discord bot](#creating-a-discord-bot) below)
 - `DB_DIR` — production database directory
 - `TEST_DB_DIR` — database directory used automatically by `python -m sandy --test`
-- `BRAIN_MODEL`, `BOUNCER_MODEL`, etc. — model names for each LLM role. By default all roles use Ollama tags.
+- `BRAIN_MODEL`, `BOUNCER_MODEL`, etc. — model names for each LLM role. By default, roles use Ollama tags unless a provider is configured otherwise.
 - `BRAIN_PROVIDER` — set to `ollama` for the original all-Ollama path, or `vllm` to send only the main brain to an OpenAI-compatible vLLM server.
 - `BRAIN_BASE_URL` / `BRAIN_API_KEY` — vLLM OpenAI-compatible endpoint settings when `BRAIN_PROVIDER=vllm`.
 - `VISION_ROUTER_MODEL` — optional tiny multimodal model for cheap pre-bouncer image captions
 - `EMBED_MODEL` — embedding model for ChromaDB (default: `mxbai-embed-large`)
-- `OLLAMA_KEEP_ALIVE` — how long ollama keeps a model in VRAM after the last request. `1h` is a better default when Sandy is the main local GPU workload; lowering it mainly buys back VRAM, not necessarily lower idle power.
+- `OLLAMA_KEEP_ALIVE` — how long Ollama keeps a model in VRAM after the last request. Longer values reduce reload churn; shorter values free VRAM sooner.
 - If multiple roles share one model tag, keep their `*_NUM_CTX` values aligned unless you want Ollama to spin up separate runners for the same model.
 
-### 3. Install and pull models
+### 3. Install or start model backends
 
 ```bash
 # Make sure ollama is running
 systemctl status ollama
 
-# Pull whatever model(s) you configured in .env
-ollama pull hf.co/unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF:UD-Q4_K_XL
+# Pull the model(s) you configured in .env
+ollama pull <brain-model>
 ollama pull mxbai-embed-large
 ```
 
@@ -114,17 +116,16 @@ Ollama *might* auto-pull on first use, but don't count on it. Pull explicitly.
 If the brain is served by vLLM, keep vLLM in its own local virtualenv:
 
 ```bash
-uv venv vllm_service/.venv --python 3.12
-uv pip install --python vllm_service/.venv/bin/python 'vllm==0.26.0' --torch-backend cu130
+(cd vllm_service && uv venv .venv --python 3.12 && uv sync && cp .env.example .env)
 ```
 
-Then start the brain endpoint before Sandy:
+Then start the brain endpoint before Sandy from the repo root:
 
 ```bash
-vllm_service/run.sh
+vllm_service/start.sh
 ```
 
-That foreground command is screen/tmux-friendly: `Ctrl-C` stops vLLM cleanly. For a detached local process, use:
+For service operations:
 
 ```bash
 vllm_service/start.sh
@@ -132,7 +133,11 @@ vllm_service/status.sh
 vllm_service/stop.sh
 ```
 
-The service scripts default to `mistralai/Mistral-Small-4-119B-2603-NVFP4` with a 16k context window on the local Blackwell GPU UUID, serve `http://127.0.0.1:8000/v1`, expose the stable OpenAI API model name `sandy-brain`, and disable the flashinfer sampler so vLLM does not require a system CUDA toolkit for sampler JIT. Keep Sandy's `BRAIN_MODEL` set to `sandy-brain` and override `VLLM_BRAIN_MODEL`, `VLLM_BRAIN_MAX_MODEL_LEN`, or `VLLM_BRAIN_CUDA_VISIBLE_DEVICES` when testing a different vLLM backend model or hardware layout.
+The service has its own `pyproject.toml`, `.env.example`, gitignored `.env`,
+and gitignored `logs/` directory. It serves `http://127.0.0.1:8000/v1` and
+exposes the stable OpenAI API model name `sandy-brain`; keep Sandy's
+`BRAIN_MODEL` set to `sandy-brain` and switch backend models in
+`vllm_service/.env`.
 
 ### 4. Start SearXNG (web search)
 
@@ -239,8 +244,8 @@ Use the local CLI to inspect them:
 ```bash
 source .venv/bin/activate
 python -m sandy.logs recent
-python -m sandy.logs show 1482258945799094444
-python -m sandy.logs find --text "color coding"
+python -m sandy.logs show <trace_id>
+python -m sandy.logs find --text "search phrase"
 python -m sandy.logs failures
 ```
 
@@ -256,9 +261,9 @@ For Recall/Chroma cleanup work:
 
 ```bash
 source .venv/bin/activate
-python -m sandy.maintenance --test recall-find --query "steam"
-python -m sandy.maintenance --test delete-vector --discord-message-id 1482282320600891422
-python -m sandy.maintenance --test purge-vector-from-recall --query "Vault of the Vanquished" --yes
+python -m sandy.maintenance --test recall-find --query "topic"
+python -m sandy.maintenance --test delete-vector --discord-message-id <discord_message_id>
+python -m sandy.maintenance --test purge-vector-from-recall --query "topic" --yes
 ```
 
 `recall-find` is the safe first step. It shows Recall rows plus any stored Discord
@@ -284,7 +289,7 @@ Set `DB_DIR` for prod and `TEST_DB_DIR` for test in `.env`. `python -m sandy --t
 3. Go to **Bot** in the sidebar
 4. Click **Reset Token** and copy it — this is your `DISCORD_API_KEY`
 5. Under **Privileged Gateway Intents**, enable:
-   - **Server Members Intent** (Sandy needs to see who's in the server)
+   - **Server Members Intent** (needed if you want member-aware behavior)
    - **Message Content Intent** (Sandy needs to read messages)
 6. Go to **OAuth2 → URL Generator**
 7. Under **Scopes**, check `bot`
@@ -344,7 +349,7 @@ sandy/
 │       ├── tts.py          # Qwen3-TTS client
 │       ├── response.py     # voice reply generation
 │       └── history.py      # voice conversation history
-├── tests/                  # pytest suite (~180+ tests)
+├── tests/                  # pytest suite
 ├── tts_service/            # standalone Qwen3-TTS FastAPI service
 ├── web/dashboard/          # local observability dashboard
 ├── searxng/                # SearXNG docker-compose

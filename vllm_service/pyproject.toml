@@ -1,0 +1,38 @@
+[project]
+name = "sandy-vllm-service"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "ninja==1.13.0",
+  "nvidia-cuda-crt==13.0.88",
+  "nvidia-cuda-nvcc==13.0.88",
+  "nvidia-cuda-runtime==13.0.96",
+  "nvidia-nvvm==13.0.88",
+  "torch==2.11.0",
+  "torchaudio==2.11.0",
+  "torchcodec==0.15.0",
+  "torchvision==0.26.0",
+  "vllm==0.26.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchaudio = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchcodec = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
