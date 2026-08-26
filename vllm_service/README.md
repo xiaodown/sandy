@@ -84,19 +84,33 @@ Supported profiles:
 | ------- | --------------- | -------- |
 | `generic` | Unknown or one-off models | No family-specific parser or feature flags |
 | `mistral` | Mistral models | `TRITON_MLA`, Mistral reasoning/tool parsers, auto tool choice |
-| `qwen3` | Qwen3 / Qwen3.6 safetensors models | Triton attention, Qwen3 reasoning/tool parsers, thinking disabled by default, text-only brain serving |
-| `qwen3-nvfp4` | Qwen3.6 NVFP4 safetensors models | Triton attention, Qwen3 parser flags, thinking disabled by default, text-only serving, FP8 KV cache, prefix caching, chunked prefill, async scheduling |
+| `qwen3` | Qwen3 / Qwen3.6 safetensors models | Triton attention, Qwen3 reasoning/tool parsers, auto tool choice, thinking disabled by default, text-only brain serving |
+| `qwen3-nvfp4` | Qwen3.6 NVFP4 safetensors models | Triton attention, Qwen3 parser flags, auto tool choice, thinking disabled by default, text-only serving, FP8 KV cache, prefix caching, chunked prefill, async scheduling |
 | `llama` | Llama-family models | Llama JSON tool parser |
 
 Every profile default can be overridden with env vars such as
 `VLLM_BRAIN_REASONING_PARSER`, `VLLM_BRAIN_SPECULATIVE_CONFIG`,
 `VLLM_BRAIN_ENABLE_MTP`, `VLLM_BRAIN_DEFAULT_CHAT_TEMPLATE_KWARGS`,
-`VLLM_BRAIN_LANGUAGE_MODEL_ONLY`, or `VLLM_BRAIN_EXTRA_ARGS`.
+`VLLM_BRAIN_LANGUAGE_MODEL_ONLY`, `VLLM_BRAIN_LIMIT_MM_PER_PROMPT`, or
+`VLLM_BRAIN_EXTRA_ARGS`.
 
 Qwen profiles set `--default-chat-template-kwargs '{"enable_thinking":false}'`
 so ordinary Sandy chat responses land in OpenAI `message.content` instead of
 `message.reasoning`. A test client can still opt into reasoning per request via
 `chat_template_kwargs`.
+
+Qwen profiles also default to text-only serving for Sandy brain stability and
+lower multimodal overhead. If the selected checkpoint supports vision and you
+want Open WebUI image uploads to work, disable text-only mode and allow image
+inputs explicitly:
+
+```env
+VLLM_BRAIN_LANGUAGE_MODEL_ONLY=false
+VLLM_BRAIN_LIMIT_MM_PER_PROMPT='{"image":1,"video":0}'
+```
+
+Without that, vLLM rejects image prompts with `At most 0 image(s) may be
+provided in one prompt`.
 
 ## Trying Another Brain Model
 

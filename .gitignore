@@ -10,6 +10,7 @@ handover*
 .python-version
 *.egg-info/
 .github*
+searxng/config/settings.yml
 # Test artifacts
 tests/.testdata/
 

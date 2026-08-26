@@ -1,0 +1,19 @@
+use_default_settings:
+  engines:
+    keep_only:
+      - braveapi
+
+search:
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: "replace-with-a-random-secret"
+  limiter: false
+
+engines:
+  - name: braveapi
+    engine: braveapi
+    shortcut: br
+    api_key: "REPLACE_WITH_BRAVE_SEARCH_API_KEY"
