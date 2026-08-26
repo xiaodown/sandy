@@ -7,13 +7,14 @@ search:
   formats:
     - html
     - json
-
 server:
-  secret_key: "replace-with-a-random-secret"
+  secret_key: "your-secret-key-that-isnt-actually-used"
   limiter: false
 
 engines:
   - name: braveapi
     engine: braveapi
     shortcut: br
-    api_key: "REPLACE_WITH_BRAVE_SEARCH_API_KEY"
+    inactive: false
+    disabled: false
+    api_key: "BRAVE-API-KEY-GOES-HERE"
